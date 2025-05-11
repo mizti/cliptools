@@ -1,0 +1,9 @@
+CacheClip
+.DS_Store
+Resolve Project Backups
+*/*.wav
+*/*.mp4
+*/*.srt
+.gallery/
+temp/*
+clip*
