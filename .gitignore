@@ -1,5 +1,6 @@
-CacheClip
 .DS_Store
+.env*
+CacheClip
 Resolve Project Backups
 */*.wav
 */*.mp4
