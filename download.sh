@@ -1,17 +1,48 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Usage: ./download.sh <YouTube URL> [-s start_time] [-e end_time] [output_dir] [filename_without_ext]
+
+# Parse arguments
+START_TIME=""
+END_TIME=""
+POSITIONAL=()
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -s|--start)
+      START_TIME="$2"
+      shift 2
+      ;;
+    -e|--end)
+      END_TIME="$2"
+      shift 2
+      ;;
+    -*|--*)
+      echo "Unknown option $1"
+      exit 1
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      ;;
+  esac
+done
+
+set -- "${POSITIONAL[@]}"
+
 if [ $# -lt 1 ] || [ $# -gt 3 ]; then
-  echo "Usage: $0 <YouTube URL> [output_dir] [filename_without_ext]"
+  echo "Usage: $0 <YouTube URL> [-s start_time] [-e end_time] [output_dir] [filename_without_ext]"
   exit 1
 fi
 
 URL="$1"
 OUTPUT_DIR="${2:-.}"
 USER_BASENAME="${3:-}"
+
 mkdir -p "$OUTPUT_DIR"
 
-# Download + Merge video/audio + subs
+# Function to download video and subtitles
 download_video() {
   local video_url="$1"
   local output_path="$2"
@@ -26,7 +57,7 @@ download_video() {
     "$video_url"
 }
 
-# Resolve safe file basename (from yt-dlp title or user input)
+# Function to get safe basename
 get_safe_basename() {
   local url="$1"
   local label="$2"
@@ -35,71 +66,43 @@ get_safe_basename() {
   echo "${safe_title}${label}"
 }
 
-if [[ "$URL" =~ youtube\.com/clip/ ]]; then
-  echo "Detected YouTube Clip URL. Extracting original video and time range..."
+# If start and end times are specified, download the full video and then trim
+if [[ -n "$START_TIME" && -n "$END_TIME" ]]; then
+  echo "Downloading specified time range: $START_TIME to $END_TIME"
 
-  HTML=$(curl -sL "$URL")
-
-  # Extract real video ID
-  VIDEO_ID=$(echo "$HTML" | grep -o '"videoId":"[^"]\{11\}"' | head -n1 | sed 's/.*"videoId":"\([^"]*\)".*/\1/')
-  if [ -z "$VIDEO_ID" ]; then
-    VIDEO_ID=$(echo "$HTML" | grep -o '<link[^>]*rel="canonical"[^>]*>' | grep -o 'watch?v=[^"&]\{11\}' | head -n1 | cut -d= -f2)
-  fi
-  if [ -z "$VIDEO_ID" ]; then
-    echo "Failed to extract video ID from clip page."
-    exit 1
-  fi
-
-  echo "Found original video ID: $VIDEO_ID"
-
-  # Extract time info
-  CLIP_CONFIG=$(echo "$HTML" | sed -n 's/.*"clipConfig":\s*\({[^}]*}\).*/\1/p')
-  START_MS=$(echo "$CLIP_CONFIG" | jq -r '.startTimeMs')
-  END_MS=$(echo "$CLIP_CONFIG" | jq -r '.endTimeMs')
-
-  if [[ -z "$START_MS" || -z "$END_MS" ]]; then
-    echo "Failed to extract start/end times."
-    exit 1
-  fi
-
-  START=$(awk "BEGIN { printf \"%.3f\", $START_MS / 1000 }")
-  DURATION=$(awk "BEGIN { printf \"%.3f\", ($END_MS - $START_MS) / 1000 }")
-  echo "Start: $START s, Duration: $DURATION s"
-
-  # File naming
   if [[ -n "$USER_BASENAME" ]]; then
     BASENAME="$USER_BASENAME"
   else
-    BASENAME=$(get_safe_basename "https://youtube.com/watch?v=$VIDEO_ID" "_clip")
+    BASENAME=$(get_safe_basename "$URL" "_clip")
   fi
 
   TEMP_TEMPLATE="${OUTPUT_DIR%/}/__ytclip_temp.%(ext)s"
   FINAL_FILE="${OUTPUT_DIR%/}/${BASENAME}.mp4"
 
-  download_video "https://youtube.com/watch?v=$VIDEO_ID" "$TEMP_TEMPLATE"
+  download_video "$URL" "$TEMP_TEMPLATE"
   TEMP_FILE=$(ls "${TEMP_TEMPLATE//%(ext)s/mp4}")
 
-  ffmpeg -i "$TEMP_FILE" -ss "$START" -t "$DURATION" -c copy "$FINAL_FILE"
+  ffmpeg -i "$TEMP_FILE" -ss "$START_TIME" -to "$END_TIME" -c copy "$FINAL_FILE"
   rm -f "$TEMP_FILE"
 
   echo "Clip extracted to: $FINAL_FILE"
-  # ---- 字幕トリミング処理 ----
+
+  # Adjust subtitles
   for lang in en ja; do
     SRC="${OUTPUT_DIR%/}/__ytclip_temp.${lang}.srt"
-    DEST="${OUTPUT_DIR%/}/${VIDEO_ID}_clip.${lang}.srt"
+    DEST="${OUTPUT_DIR%/}/${BASENAME}.${lang}.srt"
     if [[ -f "$SRC" ]]; then
       echo "Adjusting SRT ($lang)..."
       python3 "$(dirname "$0")/utils/adjust_srt_timestamp.py" \
-        "$SRC" "$DEST" "$START" "$(awk "BEGIN { print $START + $DURATION }")"
+        "$SRC" "$DEST" "$START_TIME" "$END_TIME"
       rm "$SRC"
     else
       echo "No SRT found for $lang"
     fi
   done
 
-
 else
-  # Regular video
+  # Download full video
   if [[ -n "$USER_BASENAME" ]]; then
     BASENAME="$USER_BASENAME"
   else
@@ -109,4 +112,3 @@ else
   download_video "$URL" "$OUTPUT_TEMPLATE"
   echo "Full video downloaded."
 fi
-

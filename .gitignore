@@ -8,3 +8,4 @@ Resolve Project Backups
 .gallery/
 temp/*
 clip*
+*_old.*

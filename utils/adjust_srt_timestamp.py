@@ -8,9 +8,34 @@ def parse_srt_timestamp(ts):
 def format_srt_timestamp(dt):
     return dt.strftime("%H:%M:%S,%f")[:-3]
 
-def adjust_srt(input_path, output_path, clip_start, clip_end):
-    clip_start = timedelta(seconds=float(clip_start))
-    clip_end = timedelta(seconds=float(clip_end))
+def parse_time_arg(arg):
+    """
+    Parse a time argument which can be:
+    - seconds as float (e.g., "90.5")
+    - mm:ss or m:ss (e.g., "5:30")
+    - hh:mm:ss (e.g., "01:05:30")
+    Returns total seconds as float.
+    """
+    if ":" in arg:
+        parts = arg.split(":")
+        try:
+            parts = [float(p) for p in parts]
+        except ValueError:
+            raise ValueError(f"Invalid time format: {arg}")
+        if len(parts) == 2:
+            minutes, seconds = parts
+            return minutes * 60 + seconds
+        elif len(parts) == 3:
+            hours, minutes, seconds = parts
+            return hours * 3600 + minutes * 60 + seconds
+        else:
+            raise ValueError(f"Invalid time format: {arg}")
+    else:
+        return float(arg)
+
+def adjust_srt(input_path, output_path, clip_start_sec, clip_end_sec):
+    clip_start = timedelta(seconds=clip_start_sec)
+    clip_end = timedelta(seconds=clip_end_sec)
 
     with open(input_path, 'r', encoding='utf-8') as f:
         lines = f.readlines()
@@ -36,7 +61,6 @@ def adjust_srt(input_path, output_path, clip_start, clip_end):
                             output.extend(text)
                             output.append("\n")
                 buffer = []
-
         else:
             buffer.append(line)
 
@@ -45,12 +69,19 @@ def adjust_srt(input_path, output_path, clip_start, clip_end):
 
 if __name__ == '__main__':
     if len(sys.argv) != 5:
-        print("Usage: adjust_srt_timestamp.py <input_srt> <output_srt> <clip_start_seconds> <clip_end_seconds>")
+        print("Usage: adjust_srt_timestamp.py <input_srt> <output_srt> <clip_start> <clip_end>")
         sys.exit(1)
 
     input_srt = sys.argv[1]
     output_srt = sys.argv[2]
-    clip_start = float(sys.argv[3])
-    clip_end = float(sys.argv[4])
+    start_arg = sys.argv[3]
+    end_arg = sys.argv[4]
 
-    adjust_srt(input_srt, output_srt, clip_start, clip_end)
+    try:
+        clip_start_sec = parse_time_arg(start_arg)
+        clip_end_sec = parse_time_arg(end_arg)
+    except ValueError as e:
+        print(e)
+        sys.exit(1)
+
+    adjust_srt(input_srt, output_srt, clip_start_sec, clip_end_sec)
