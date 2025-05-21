@@ -9,3 +9,7 @@ Resolve Project Backups
 temp/*
 clip*
 *_old.*
+*key.json
+.gcp
+.gcp/*
+ tmp_transcription.json 
