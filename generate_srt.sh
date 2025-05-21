@@ -95,56 +95,58 @@ while true; do
   printf '.'; sleep 5
 done
 
-# ────────────────────────────────────────────────────────────────────────────
-# 5) ファイル一覧取得
 
+# 5) ファイル一覧取得（変わらず）
 FILES_URL=$(az rest --only-show-errors --resource "" --method get \
             --uri "$JOB_URL" \
-            --headers "Ocp-Apim-Subscription-Key=$SPEECH_KEY" \
-            | jq -r '.links.files')
-
+            --headers "Ocp-Apim-Subscription-Key=$SPEECH_KEY" | jq -r '.links.files')
 FILES_JSON=$(az rest --only-show-errors --resource "" --method get \
               --uri "$FILES_URL" \
               --headers "Ocp-Apim-Subscription-Key=$SPEECH_KEY")
 
-SRT_URL=$(echo "$FILES_JSON" | \
+SRT_URL=$(echo "$FILES_JSON" |
           jq -r '.values[] | select(.name|endswith(".srt")) | .links.contentUrl')
 
-# ────────────────────────────────────────────────────────────────────────────
-# 6-A) SRT が直接取得できる場合
-
-if [[ -n $SRT_URL ]]; then
-  curl -s -H "Ocp-Apim-Subscription-Key:$SPEECH_KEY" \
-       "$SRT_URL" -o "$OUTPUT_SRT"
+if [[ -n $SRT_URL ]]; then       # 6-A) 直接 SRT がある場合
+  curl -s -H "Ocp-Apim-Subscription-Key:$SPEECH_KEY" "$SRT_URL" -o "$OUTPUT_SRT"
   echo "SRT 保存完了: $OUTPUT_SRT"
   exit 0
 fi
 
-# ────────────────────────────────────────────────────────────────────────────
-# 6-B) フォールバック: JSON → SRT 変換
-
+# ------------------- 6-B) JSON → SRT フォールバック -------------------------
 echo "SRT が返されなかったため JSON → SRT を変換します"
 
-JSON_URL=$(echo "$FILES_JSON" | \
-           jq -r '.values[] | select(.kind=="Transcription") | .links.contentUrl')
-
-curl -s -H "Ocp-Apim-Subscription-Key:$SPEECH_KEY" \
-     "$JSON_URL" -o tmp_transcription.json
+JSON_URL=$(echo "$FILES_JSON" | jq -r \
+          '.values[] | select(.kind=="Transcription") | .links.contentUrl')
+curl -s -H "Ocp-Apim-Subscription-Key:$SPEECH_KEY" "$JSON_URL" -o tmp_transcription.json
 
 jq -r '
-  .recognizedPhrases[]
-  | (.offset   | gsub("^PT|S$";"") | tonumber) as $start
-  | (.duration | gsub("^PT|S$";"") | tonumber) as $dur
-  | ($start + $dur) as $end
-  | [$start,$end, .nBest[0].display] | @tsv
+  # ISO-8601 PT#H#M#S を秒(float)へ変換
+  def tosec:
+    capture("PT((?<h>[0-9.]+)H)?((?<m>[0-9.]+)M)?((?<s>[0-9.]+)S)?") as $m
+    | (($m.h // 0 | tonumber)*3600)
+    + (($m.m // 0 | tonumber)*60)
+    +  ($m.s // 0 | tonumber);
+
+  [ .recognizedPhrases[]
+      | (.offset   | tosec) as $start
+      | (.duration | tosec) as $dur
+      | { start: $start,
+          end:   ($start + $dur),
+          text:  .nBest[0].display } ]
+  | sort_by(.start)
+  | .[]
+  | [.start, .end, .text]        # TSV 3 列: start  end  text
+  | @tsv
 ' tmp_transcription.json |
 awk -F'\t' '
 function ts(sec){
-  h=int(sec/3600); m=int((sec-h*3600)/60); s=sec-h*3600-m*60;
-  return sprintf("%02d:%02d:%06.3f",h,m,s) }
-{ idx=NR; printf "%d\n%s --> %s\n%s\n\n",idx,ts($1),ts($2),$3 }' \
-> "$OUTPUT_SRT"
+  h=int(sec/3600); m=int((sec-h*3600)/60); s=sec-h*3600-m*60
+  return sprintf("%02d:%02d:%02d,%03d",h,m,int(s),int((s-int(s))*1000))
+}
+{
+  printf "%d\n%s --> %s\n%s\n\n", NR, ts($1), ts($2), $3
+}' > "$OUTPUT_SRT"
 
 rm -f tmp_transcription.json
 echo "SRT 変換完了: $OUTPUT_SRT"
-
