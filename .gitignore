@@ -12,6 +12,7 @@ clip*
 *key.json
 .gcp
 .gcp/*
-tmp.json
+tmp*.json
 tmp_transcription.json
 materials/*
+*.wav
