@@ -47,7 +47,7 @@ download_video() {
   local video_url="$1"
   local output_path="$2"
   yt-dlp \
-    -f 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4' \
+    -f 'bestvideo+bestaudio/best' \
     --merge-output-format mp4 \
     --write-subs \
     --write-auto-sub \
