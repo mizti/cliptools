@@ -12,6 +12,6 @@ clip*
 *key.json
 .gcp
 .gcp/*
+tmp.json
 tmp_transcription.json
 materials/*
-

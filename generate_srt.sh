@@ -1,150 +1,239 @@
 #!/usr/bin/env bash
 set -euo pipefail
+DEBUG=${DEBUG:-false}
+
 # -----------------------------------------------------------------------------
 # generate_srt.sh
-#   Azure Speech Fast Transcription (REST 2024-11-15) で .wav → .srt を生成。
-#   SRT が返らないリージョンでは JSON をローカル変換して必ず SRT を出力。
+#   - 通常: REST 2024-11-15 で .wav → .srt
+#   - 話者分離: v3.2-preview.2 で .wav → モノラル変換 → 複数 JSON セグメント取得 → 話者ごとに .srt
 #
-# 必要ツール: az CLI, jq, curl
-# .env に以下を定義しておくこと:
-#   RESOURCE_GROUP_NAME   ストレージアカウント RG 名
-#   STORAGE_ACCOUNT_NAME  ストレージアカウント名
-#   CONTAINER_NAME        WAV を置く Blob コンテナ名
-#   SPEECH_KEY            Speech サブスクリプションキー
-#   SPEECH_REGION         Speech リージョン (例 japaneast)
+# Usage: DEBUG=true ./generate_srt.sh [-m MIN -M MAX] <audio.wav> [en-US|ja-JP]
 # -----------------------------------------------------------------------------
 
-# 0) .env 読み込み ─────────────────────────────────────────────────────────────
-[[ -f .env ]] || { echo ".env が見つかりません"; exit 1; }
-# shellcheck disable=SC1091
-source .env
+usage(){
+  cat <<USG >&2
+Usage: $0 [-m MIN -M MAX] <audio.wav> [en-US|ja-JP]
+  -m N   最小話者数 (diarization)
+  -M N   最大話者数 (diarization)
+  (両方指定しない場合は通常モード)
+USG
+  exit 1
+}
 
-# 1) 引数チェック ────────────────────────────────────────────────────────────
-[[ $# -ge 1 ]] || { echo "Usage: $0 <audio.wav> [en-US|ja-JP]"; exit 1; }
-AUDIO_FILE="$1"; LOCALE="${2:-en-US}"
-[[ $LOCALE =~ ^(en-US|ja-JP)$ ]] || { echo "locale は en-US / ja-JP"; exit 2; }
+# 1) オプション解析
+MIN_SPK=""; MAX_SPK=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -m) MIN_SPK="$2"; shift 2 ;;  
+    -M) MAX_SPK="$2"; shift 2 ;;  
+    --) shift; break ;;  
+    -*) usage ;;  
+    *) break ;;  
+  esac
+done
+
+# 2) 引数チェック
+[[ $# -ge 1 && $# -le 2 ]] || usage
+AUDIO_FILE="$1"
+LOCALE="${2:-en-US}"
+[[ "$LOCALE" =~ ^(en-US|ja-JP)$ ]] || { echo "locale は en-US/ja-JP" >&2; exit 1; }
+DIAR=false
+if [[ -n $MIN_SPK || -n $MAX_SPK ]]; then
+  [[ -n $MIN_SPK && -n $MAX_SPK ]] || { echo "-m と -M を両方指定してください" >&2; exit 1; }
+  DIAR=true
+fi
 
 BASENAME=$(basename "$AUDIO_FILE" .wav)
-DIRNAME=$(dirname  "$AUDIO_FILE")
-OUTPUT_SRT="${DIRNAME}/gen_${LOCALE}.srt"
+DIRNAME=$(dirname "$AUDIO_FILE")
 
-# 2) WAV を Blob へアップロード（同名上書き可）───────────────────────────────
-EXPIRY=$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%MZ' 2>/dev/null || date -u -v+1H '+%Y-%m-%dT%H:%MZ')
+# 3) .env 読み込み
+[[ -f .env ]] || { echo ".env がありません" >&2; exit 1; }
+source .env
+
+# 4) Blob アップロード (ステレオ→モノラル変換 for diarization)
+EXP=$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%MZ' 2>/dev/null || date -u -v+1H '+%Y-%m-%dT%H:%MZ')
+if $DIAR; then
+  echo "DEBUG: converting stereo → mono for diarization…"
+  MONO_FILE="${BASENAME}_mono.wav"
+  ffmpeg -y -i "$AUDIO_FILE" -ac 1 "$MONO_FILE"
+  UPLOAD_SRC="$MONO_FILE"
+else
+  UPLOAD_SRC="$AUDIO_FILE"
+fi
 
 az storage blob upload --only-show-errors --auth-mode login \
-  --account-name "$STORAGE_ACCOUNT_NAME" \
-  --container-name "$CONTAINER_NAME" \
-  --name "${BASENAME}.wav" \
-  --file "$AUDIO_FILE" \
-  --overwrite true
+  --account-name "$STORAGE_ACCOUNT_NAME" --container-name "$CONTAINER_NAME" \
+  --name "${BASENAME}.wav" --file "$UPLOAD_SRC" --overwrite true
 
-ACCOUNT_KEY=$(az storage account keys list \
-  -g "$RESOURCE_GROUP_NAME" -n "$STORAGE_ACCOUNT_NAME" \
-  --query '[0].value' -o tsv)
+# 5) SAS 発行
+KEY=$(az storage account keys list -g "$RESOURCE_GROUP_NAME" \
+     -n "$STORAGE_ACCOUNT_NAME" --query '[0].value' -o tsv)
 
-SAS_TOKEN=$(az storage blob generate-sas \
-  --account-name "$STORAGE_ACCOUNT_NAME" \
-  --container-name "$CONTAINER_NAME" \
-  --name "${BASENAME}.wav" \
-  --permissions r \
-  --https-only \
-  --expiry "$EXPIRY" \
-  --account-key "$ACCOUNT_KEY" \
-  -o tsv)
+# 通常モード用ファイル SAS
+FILE_SAS=$(az storage blob generate-sas -o tsv \
+  --account-name "$STORAGE_ACCOUNT_NAME" --container-name "$CONTAINER_NAME" \
+  --name "${BASENAME}.wav" --permissions r --https-only \
+  --expiry "$EXP" --account-key "$KEY")
+FILE_URL="https://${STORAGE_ACCOUNT_NAME}.blob.core.windows.net/${CONTAINER_NAME}/${BASENAME}.wav?${FILE_SAS}"
 
-FILE_URL="https://${STORAGE_ACCOUNT_NAME}.blob.core.windows.net/${CONTAINER_NAME}/${BASENAME}.wav?${SAS_TOKEN}"
+# 話者分離モード用コンテナ SAS（末尾スラッシュ付き）
+CONT_SAS=$(az storage container generate-sas -o tsv \
+  --account-name "$STORAGE_ACCOUNT_NAME" --name "$CONTAINER_NAME" \
+  --permissions rl --https-only --expiry "$EXP" --account-key "$KEY")
+CONT_URL="https://${STORAGE_ACCOUNT_NAME}.blob.core.windows.net/${CONTAINER_NAME}/?${CONT_SAS}"
 
-# 3) Fast Transcription ジョブ作成 (REST 2024-11-15)───────────────────────────
-API_VER="2024-11-15"
-ENDPOINT="https://${SPEECH_REGION}.api.cognitive.microsoft.com"
+if $DEBUG; then
+  echo "DEBUG: FILE_URL = $FILE_URL"
+  echo "DEBUG: CONT_URL = $CONT_URL"
+fi
 
-JOB_DEF=$(mktemp)
-cat >"$JOB_DEF" <<JSON
+ENDP="https://${SPEECH_REGION}.api.cognitive.microsoft.com"
+
+# 6) ジョブ作成
+if $DIAR; then
+  API="speechtotext/v3.2-preview.2/transcriptions"
+  BODY=$(mktemp)
+  cat >"$BODY" <<JSON
 {
-  "displayName": "$BASENAME",
-  "locale": "$LOCALE",
-  "contentUrls": ["$FILE_URL"],
-  "properties": {
-    "captionFormats": ["Srt"],
-    "timeToLiveHours": 48
+  "displayName":"$BASENAME",
+  "locale":"$LOCALE",
+  "contentContainerUrl":"$CONT_URL",
+  "properties":{
+    "diarizationEnabled":true,
+    "wordLevelTimestampsEnabled":true,
+    "punctuationMode":"DictatedAndAutomatic",
+    "profanityFilterMode":"Masked",
+    "channels":[0]$([[ $MIN_SPK -gt 2 || $MAX_SPK -gt 2 ]] && \
+      printf ',\n    "diarization":{"speakers":{"minCount":%s,"maxCount":%s}}' \
+             "$MIN_SPK" "$MAX_SPK")
   }
 }
 JSON
 
-JOB_URL=$(az rest --only-show-errors --resource "" --method post \
-  --uri "$ENDPOINT/speechtotext/transcriptions:submit?api-version=$API_VER" \
-  --headers "Ocp-Apim-Subscription-Key=$SPEECH_KEY" \
-  --body @"$JOB_DEF" | jq -r .self)
-rm "$JOB_DEF"
+  CREATE=$(az rest $([ "$DEBUG" = true ]&&echo --debug) --only-show-errors \
+    --method post --uri "$ENDP/$API" \
+    --headers "Ocp-Apim-Subscription-Key=$SPEECH_KEY" \
+    --body @"$BODY")
+  rm "$BODY"
+else
+  API="speechtotext/transcriptions:submit?api-version=2024-11-15"
+  BODY=$(mktemp)
+  cat >"$BODY" <<JSON
+{
+  "displayName":"$BASENAME",
+  "locale":"$LOCALE",
+  "contentUrls":["$FILE_URL"],
+  "properties":{"captionFormats":["Srt"],"timeToLiveHours":48}
+}
+JSON
 
-# 4) ステータス監視（静かなドット表示）──────────────────────────────────────
-printf 'Transcribing'
+  CREATE=$(az rest $([ "$DEBUG" = true ]&&echo --debug) --only-show-errors \
+    --method post --uri "$ENDP/$API" \
+    --headers "Ocp-Apim-Subscription-Key=$SPEECH_KEY" \
+    --body @"$BODY")
+  rm "$BODY"
+fi
+
+echo "DEBUG: CREATE response"
+echo "$CREATE" | jq .
+
+# 7) URL 組み立て
+JOB_URL=$(echo "$CREATE" | jq -r .self)
+if $DIAR; then
+  STATUS_URL="$JOB_URL?api-version=3.2-preview.2"
+else
+  STATUS_URL="$JOB_URL"
+fi
+
+echo "DEBUG: JOB_URL    = $JOB_URL"
+echo "DEBUG: STATUS_URL = $STATUS_URL"
+
+# 8) ステータス監視
+printf 'Processing'
 while true; do
-  STATUS=$(az rest --only-show-errors --resource "" --method get \
-           --uri "$JOB_URL" \
-           --headers "Ocp-Apim-Subscription-Key=$SPEECH_KEY" \
-           --query status -o tsv)
-  [[ $STATUS == Succeeded ]] && { printf ' done\n'; break; }
-  [[ $STATUS == Failed    ]] && { echo ' failed'; exit 3; }
+  STATUS=$(az rest --only-show-errors --method get --uri "$STATUS_URL" \
+    --headers "Ocp-Apim-Subscription-Key=$SPEECH_KEY" \
+    --query status -o tsv)
+  echo " DEBUG: STATUS = $STATUS"
+  if [[ $STATUS == Succeeded ]]; then printf ' done\n'; break; fi
+  if [[ $STATUS == Failed ]]; then
+    printf ' failed\nError details:\n'
+    curl -s -H "Ocp-Apim-Subscription-Key=$SPEECH_KEY" "$STATUS_URL" \
+      | jq '.properties.error // .properties.errors'
+    exit 3
+  fi
   printf '.'; sleep 5
 done
 
-# 5) ファイル一覧取得 ───────────────────────────────────────────────────────
-FILES_URL=$(az rest --only-show-errors --resource "" --method get \
-            --uri "$JOB_URL" \
-            --headers "Ocp-Apim-Subscription-Key=$SPEECH_KEY" | jq -r '.links.files')
+# 9) 結果取得
+FILES_URL=$(echo "$CREATE" | jq -r .links.files)
+FILES_URL="${FILES_URL}?api-version=3.2-preview.2"
+if $DEBUG; then echo "DEBUG: FETCHING FILES_URL → $FILES_URL"; fi
 
-FILES_JSON=$(az rest --only-show-errors --resource "" --method get \
-              --uri "$FILES_URL" \
-              --headers "Ocp-Apim-Subscription-Key=$SPEECH_KEY")
+FILES_JSON=$(az rest --only-show-errors --method get --uri "$FILES_URL" \
+  --headers "Ocp-Apim-Subscription-Key=$SPEECH_KEY")
+if $DEBUG; then echo "DEBUG: FILES_JSON →"; echo "$FILES_JSON" | jq .; fi
 
-SRT_URL=$(echo "$FILES_JSON" | \
-          jq -r '.values[] | select(.name|endswith(".srt")) | .links.contentUrl')
-
-# 6-A) SRT が直接取得できる場合 ──────────────────────────────────────────────
-if [[ -n $SRT_URL ]]; then
-  curl -s -H "Ocp-Apim-Subscription-Key:$SPEECH_KEY" \
-       "$SRT_URL" -o "$OUTPUT_SRT"
-  echo "SRT 保存完了: $OUTPUT_SRT"
+# 10-A) 通常モード: direct SRT
+if ! $DIAR; then
+  SRT_URL=$(echo "$FILES_JSON" | jq -r '.values[]|select(.name|endswith(".srt"))|.links.contentUrl')
+  out="${DIRNAME}/gen_${LOCALE}.srt"
+  curl -s -H "Ocp-Apim-Subscription-Key:$SPEECH_KEY" "$SRT_URL" -o "$out"
+  echo "SRT saved: $out"
   exit 0
 fi
 
-# 6-B) フォールバック: JSON → SRT 変換 (channel 0 のみ採用)─────────────────
-echo "SRT が返されなかったため JSON → SRT を変換します"
+# 10-B) JSON→SRT (複数セグメント統合)
+# POSIX互換: Bash3.x では mapfile が使えないため while-readで配列化
+JSON_URLS=()
+while IFS= read -r url; do
+  JSON_URLS+=( "$url" )
+done < <(
+  echo "$FILES_JSON" \
+    | jq -r '.values
+      | map(select(.kind=="Transcription"))
+      | .[].links.contentUrl'
+)
+TMP_DIR=$(mktemp -d)
+for idx in "${!JSON_URLS[@]}"; do
+  url=${JSON_URLS[idx]}
+  curl -s -H "Ocp-Apim-Subscription-Key:$SPEECH_KEY" \
+    "$url" -o "$TMP_DIR/seg_${idx}.json"
+done
 
-JSON_URL=$(echo "$FILES_JSON" | \
-           jq -r '.values[] | select(.kind=="Transcription") | .links.contentUrl')
-curl -s -H "Ocp-Apim-Subscription-Key:$SPEECH_KEY" \
-     "$JSON_URL" -o tmp_transcription.json
+# recognizedPhrases 配列をまとめる
+jq -s '[.[]|.recognizedPhrases[]]' "$TMP_DIR"/seg_*.json > tmp.json
+if $DEBUG; then echo "DEBUG: tmp.json preview →"; head -n 20 tmp.json; fi
 
-jq -r '
-  # ISO-8601 PT#H#M#S → 秒(float)
-  def tosec:
-    capture("PT((?<h>[0-9.]+)H)?((?<m>[0-9.]+)M)?((?<s>[0-9.]+)S)?") as $m
-    | (($m.h // 0 | tonumber) * 3600)
-    + (($m.m // 0 | tonumber) * 60)
-    +  ($m.s // 0 | tonumber);
+# SRT 生成準備
+read -r -d '' toSec <<'EOF'
+def tosec:
+  capture("PT((?<h>[0-9.]+)H)?((?<m>[0-9.]+)M)?((?<s>[0-9.]+)S)?") as $m
+  | (($m.h//0|tonumber)*3600)+(($m.m//0|tonumber)*60)+($m.s//0|tonumber);
+EOF
 
-  [ .recognizedPhrases[]
-      | select(.channel == 0)              # ★ 片チャンネルのみ採用
-      | (.offset   | tosec) as $start
-      | (.duration | tosec) as $dur
-      | { start: $start,
-          end:   ($start + $dur),
-          text:  .nBest[0].display } ]
-  | sort_by(.start)
-  | .[]
-  | [.start, .end, .text] | @tsv
-' tmp_transcription.json |
-awk -F'\t' '
-function ts(sec){
-  h=int(sec/3600); m=int((sec-h*3600)/60); s=sec-h*3600-m*60
-  return sprintf("%02d:%02d:%02d,%03d",h,m,int(s),int((s-int(s))*1000))
-}
-{
-  printf "%d\n%s --> %s\n%s\n\n", NR, ts($1), ts($2), $3
-}' > "$OUTPUT_SRT"
+speakers=( $(jq -r '.[]?.speaker // empty' tmp.json | sort -nu) )
+if $DEBUG; then echo "DEBUG: speakers → ${speakers[*]:-<none>}"; fi
 
-#rm -f tmp_transcription.json
-echo "SRT 変換完了: $OUTPUT_SRT"
+for sp in "${speakers[@]}"; do
+  out="${DIRNAME}/gen_Speaker${sp}_${LOCALE}.srt"
+  jq -r "$toSec
+    [ .[]
+      | select(.speaker==$sp)
+      | (.offset|tosec) as \\$s
+      | (.duration|tosec) as \\$d
+      | {start":\\$s,end:(\\$s+\\$d),text:.nBest[0].display} ]
+    | sort_by(.start)
+    | .[]
+    | [.start,.end,.text]|@tsv
+  " tmp.json \
+  | awk -F'\t' '
+    function ts(t){h=int(t/3600);m=int((t-h*3600)/60);s=t-h*3600-m*60;ms=int((t-int(t))*1000);
+      return sprintf("%02d:%02d:%02d,%03d",h,m,s,ms)}
+    {printf "%d\n%s --> %s\n%s\n\n",NR,ts(\$1),ts(\$2),\$3}
+  ' > "$out"
+  echo "Speaker $sp SRT: $out"
+done
+
+rm -rf "$TMP_DIR" tmp.json
 
