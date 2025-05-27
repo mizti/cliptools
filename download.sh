@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: ./download.sh <YouTube URL> [-s start_time] [-e end_time] [output_dir] [filename_without_ext]
+# Usage: ./download.sh <YouTube URL> [-s start_time] [-e end_time] [-w] [output_dir] [filename_without_ext]
 
 # Parse arguments
 START_TIME=""
 END_TIME=""
+AUDIO_ONLY=false
 POSITIONAL=()
 
 while [[ $# -gt 0 ]]; do
@@ -17,6 +18,10 @@ while [[ $# -gt 0 ]]; do
     -e|--end)
       END_TIME="$2"
       shift 2
+      ;;
+    -w|--audio-only)
+      AUDIO_ONLY=true
+      shift
       ;;
     -*|--*)
       echo "Unknown option $1"
@@ -32,7 +37,7 @@ done
 set -- "${POSITIONAL[@]}"
 
 if [ $# -lt 1 ] || [ $# -gt 3 ]; then
-  echo "Usage: $0 <YouTube URL> [-s start_time] [-e end_time] [output_dir] [filename_without_ext]"
+  echo "Usage: $0 <YouTube URL> [-s start_time] [-e end_time] [-w] [output_dir] [filename_without_ext]"
   exit 1
 fi
 
@@ -42,7 +47,7 @@ USER_BASENAME="${3:-}"
 
 mkdir -p "$OUTPUT_DIR"
 
-# Function to download video and subtitles
+# Function to download video + subtitles
 download_video() {
   local video_url="$1"
   local output_path="$2"
@@ -57,58 +62,77 @@ download_video() {
     "$video_url"
 }
 
+# Function to download audio only
+download_audio() {
+  local audio_url="$1"
+  local output_path="${2%.*}.mp3"
+  yt-dlp \
+    -f bestaudio \
+    --extract-audio \
+    --audio-format mp3 \
+    --output "$output_path" \
+    "$audio_url"
+}
+
 # Function to get safe basename
 get_safe_basename() {
   local url="$1"
   local label="$2"
-  local raw_title=$(yt-dlp --get-title "$url")
-  local safe_title="${raw_title//[^a-zA-Z0-9._-]/_}"
+  local raw_title
+  raw_title=$(yt-dlp --get-title "$url")
+  local safe_title
+  safe_title="${raw_title//[^a-zA-Z0-9._-]/_}"
   echo "${safe_title}${label}"
 }
 
-# If start and end times are specified, download the full video and then trim
+# Main logic
 if [[ -n "$START_TIME" && -n "$END_TIME" ]]; then
-  echo "Downloading specified time range: $START_TIME to $END_TIME"
+  echo "Processing clip from $START_TIME to $END_TIME"
 
-  if [[ -n "$USER_BASENAME" ]]; then
-    BASENAME="$USER_BASENAME"
-  else
-    BASENAME=$(get_safe_basename "$URL" "_clip")
-  fi
-
+  BASENAME="${USER_BASENAME:-$(get_safe_basename "$URL" "${AUDIO_ONLY:+_clip}")}"
   TEMP_TEMPLATE="${OUTPUT_DIR%/}/__ytclip_temp.%(ext)s"
-  FINAL_FILE="${OUTPUT_DIR%/}/${BASENAME}.mp4"
+  FINAL_EXT="${AUDIO_ONLY:+mp3}${AUDIO_ONLY:+}"  # will be mp3 or skip
+  FINAL_EXT="${AUDIO_ONLY:+mp3}${AUDIO_ONLY:+}" 
+  if [[ "$AUDIO_ONLY" == true ]]; then
+    download_audio "$URL" "$TEMP_TEMPLATE"
+    TEMP_FILE=$(ls "${TEMP_TEMPLATE//%(ext)s/mp3}")
+    FINAL_FILE="${OUTPUT_DIR%/}/${BASENAME}.mp3"
+    ffmpeg -i "$TEMP_FILE" -ss "$START_TIME" -to "$END_TIME" -c copy "$FINAL_FILE"
+    rm -f "$TEMP_FILE"
+    echo "Audio clip extracted to: $FINAL_FILE"
+  else
+    download_video "$URL" "$TEMP_TEMPLATE"
+    TEMP_FILE=$(ls "${TEMP_TEMPLATE//%(ext)s/mp4}")
+    FINAL_FILE="${OUTPUT_DIR%/}/${BASENAME}.mp4"
+    ffmpeg -i "$TEMP_FILE" -ss "$START_TIME" -to "$END_TIME" -c copy "$FINAL_FILE"
+    rm -f "$TEMP_FILE"
+    echo "Video clip extracted to: $FINAL_FILE"
 
-  download_video "$URL" "$TEMP_TEMPLATE"
-  TEMP_FILE=$(ls "${TEMP_TEMPLATE//%(ext)s/mp4}")
-
-  ffmpeg -i "$TEMP_FILE" -ss "$START_TIME" -to "$END_TIME" -c copy "$FINAL_FILE"
-  rm -f "$TEMP_FILE"
-
-  echo "Clip extracted to: $FINAL_FILE"
-
-  # Adjust subtitles
-  for lang in en ja; do
-    SRC="${OUTPUT_DIR%/}/__ytclip_temp.${lang}.srt"
-    DEST="${OUTPUT_DIR%/}/${BASENAME}.${lang}.srt"
-    if [[ -f "$SRC" ]]; then
-      echo "Adjusting SRT ($lang)..."
-      python3 "$(dirname "$0")/utils/adjust_srt_timestamp.py" \
-        "$SRC" "$DEST" "$START_TIME" "$END_TIME"
-      rm "$SRC"
-    else
-      echo "No SRT found for $lang"
-    fi
-  done
+    # Adjust subtitles
+    for lang in en ja; do
+      SRC="${OUTPUT_DIR%/}/__ytclip_temp.${lang}.srt"
+      DEST="${OUTPUT_DIR%/}/${BASENAME}.${lang}.srt"
+      if [[ -f "$SRC" ]]; then
+        echo "Adjusting SRT ($lang)..."
+        python3 "$(dirname "$0")/utils/adjust_srt_timestamp.py" \
+          "$SRC" "$DEST" "$START_TIME" "$END_TIME"
+        rm "$SRC"
+      else
+        echo "No SRT found for $lang"
+      fi
+    done
+  fi
 
 else
-  # Download full video
-  if [[ -n "$USER_BASENAME" ]]; then
-    BASENAME="$USER_BASENAME"
+  # No clipping; full download
+  BASENAME="${USER_BASENAME:-$(get_safe_basename "$URL" "")}"
+  if [[ "$AUDIO_ONLY" == true ]]; then
+    download_audio "$URL" "${OUTPUT_DIR%/}/${BASENAME}.%(ext)s"
+    echo "Audio downloaded to: ${OUTPUT_DIR%/}/${BASENAME}.mp3"
   else
-    BASENAME=$(get_safe_basename "$URL" "")
+    OUTPUT_TEMPLATE="${OUTPUT_DIR%/}/${BASENAME}.%(ext)s"
+    download_video "$URL" "$OUTPUT_TEMPLATE"
+    echo "Full video downloaded."
   fi
-  OUTPUT_TEMPLATE="${OUTPUT_DIR%/}/${BASENAME}.%(ext)s"
-  download_video "$URL" "$OUTPUT_TEMPLATE"
-  echo "Full video downloaded."
 fi
+
