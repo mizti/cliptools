@@ -105,6 +105,7 @@ for idx, block in enumerate(
 
     # ― (2) 逐次追記＋ブロック間に必ず空行を 1 行入れる ―
     with dst_path.open('a', encoding='utf-8') as f_out:
+        f_out.write('\n')         # 追加の空行
         f_out.write(content)
         f_out.write('\n')         # 追加の空行
         f_out.flush()
