@@ -164,7 +164,7 @@ step "Generate SRT"
 SPKS=$(jq -r '.[].speaker // empty' "$TMP_JSON" | sort -nu)
 LAST_OUT=""
 for sp in $SPKS; do
-  OUT="${DIR}/${BASE}_Speaker${sp}_${LOCALE}.srt"
+  OUT="${DIR}/Speaker${sp}_${LOCALE}.srt"
   LAST_OUT="$OUT"
   jq -r --arg sp "$sp" '
     def tosec: capture("PT((?<h>[0-9.]+)H)?((?<m>[0-9.]+)M)?((?<s>[0-9.]+)S)?")
