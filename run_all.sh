@@ -87,8 +87,14 @@ MEDIA_PATH=""
 if [[ -n $URL ]]; then
   # download.sh の “安全なタイトル → ファイル名” ロジックを踏襲:contentReference[oaicite:0]{index=0}
   get_safe_basename() {
-    local raw; raw=$(yt-dlp --get-title "$1")
-    echo "${raw//[^a-zA-Z0-9._-]/_}"
+    # $1 = 出力ディレクトリ (= OUTDIR)
+    local outdir="$1"
+    local raw="downloaded_clip"                   # -o 省略時の既定名
+  
+    if [[ -n "$outdir" && "$outdir" != "." ]]; then
+      raw=$(basename "$outdir")                   # -o があれば末尾名
+    fi
+    echo "${raw//[^a-zA-Z0-9._-]/_}"              # 安全化して返す
   }
   BASENAME=$(get_safe_basename "$URL")
 

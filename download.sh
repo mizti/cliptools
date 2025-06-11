@@ -55,11 +55,13 @@ download_video() {
     -f 'bestvideo+bestaudio/best' \
     --merge-output-format mp4 \
     --write-subs \
+    --cookies-from-browser chrome \
     --write-auto-sub \
     --sub-lang en,ja \
     --convert-subs srt \
     --output "$output_path" \
     "$video_url"
+    #--extractor-args "youtube:player_client=ios" \
 }
 
 # Function to download audio only
@@ -69,20 +71,23 @@ download_audio() {
   yt-dlp \
     -f bestaudio \
     --extract-audio \
+    --cookies-from-browser chrome \
     --audio-format mp3 \
     --output "$output_path" \
     "$audio_url"
+    #--extractor-args "youtube:player_client=ios" \
 }
 
 # Function to get safe basename
 get_safe_basename() {
-  local url="$1"
-  local label="$2"
-  local raw_title
-  raw_title=$(yt-dlp --get-title "$url")
-  local safe_title
-  safe_title="${raw_title//[^a-zA-Z0-9._-]/_}"
-  echo "${safe_title}${label}"
+  # $1 = 出力ディレクトリ (= OUTDIR)
+  local outdir="$1"
+  local raw="downloaded_clip"                   # -o 省略時の既定名
+
+  if [[ -n "$outdir" && "$outdir" != "." ]]; then
+    raw=$(basename "$outdir")                   # -o があれば末尾名
+  fi
+  echo "${raw//[^a-zA-Z0-9._-]/_}"              # 安全化して返す
 }
 
 # Main logic
