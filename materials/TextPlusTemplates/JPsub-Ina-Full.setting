@@ -1,0 +1,45 @@
+{
+	Tools = ordered() {
+		Template = TextPlus {
+			CtrlWZoom = false,
+			Inputs = {
+				GlobalOut = Input { Value = 80, },
+				Width = Input { Value = 1920, },
+				Height = Input { Value = 1080, },
+				UseFrameFormatSettings = Input { Value = 1, },
+				LayoutType = Input { Value = 1, },
+				Wrap = Input { Value = 1, },
+				Center = Input { Value = { 0.5, 0.107 }, },
+				LayoutWidth = Input { Value = 0.866, },
+				LineSpacing = Input { Value = 0.756, },
+				CharacterSpacing = Input { Value = 0.97, },
+				SelectElement = Input { Value = 2, },
+				Select = Input { Value = 2, },
+				Name2 = Input { Value = " Outline", },
+				Enabled2 = Input { Value = 1, },
+				Enabled3 = Input { Value = 1, },
+				Red1 = Input { Value = 0.443137254901961, },
+				Green1 = Input { Value = 0.270588235294118, },
+				Blue1 = Input { Value = 0.913725490196078, },
+				StyledText = Input { Value = "私が彼女のプラットを掴んでる。私が彼女のプラットを掴んでる。私女のプラットを掴んでる。私が彼女のプラットを掴んでる。私", },
+				Font = Input { Value = "LightNovelPopV2", },
+				Style = Input { Value = "V2", },
+				Size = Input { Value = 0.1, },
+				VerticalJustificationNew = Input { Value = 3, },
+				HorizontalJustificationNew = Input { Value = 3, },
+				TabSpacing = Input { Value = 1, },
+				AdvancedFontControls = Input { Value = 1, },
+				ForceMonospaced = Input { Value = 0.2, },
+				Filter = Input { Value = "StyledText\nWidth\nHeight\nUseFrameFormatSettings\nFilter", },
+				Thickness2 = Input { Value = 0.0717, },
+				OutsideOnly2 = Input { Value = 1, },
+				Green2 = Input { Value = 1, },
+				Blue2 = Input { Value = 1, },
+				Softness2 = Input { Value = 1, },
+				Softness3 = Input { Value = 1, }
+			},
+			ViewInfo = OperatorInfo { Pos = { 220, 49.5 } },
+			UserControls = ordered() { SaveSettings = { INP_Integer = false, INPID_InputControl = "ButtonControl", BTNCS_Execute = "local node = self:GetTool()\nlocal path = fusion:RequestFile(\n    '',\n    node.Name .. '.setting',\n    {\n        FReqB_Saving = true,\n        FReqB_SeqGather = false,\n        FReqS_Filter = 'Settings File (*.setting)|*.setting',\n        FReqS_Title = 'Save Settings',\n    }\n)\nif path then\n    node:SaveSettings(comp:MapPath(path))\n    print('Save: ' .. comp:MapPath(path))\nend\n", LINKID_DataType = "Number", ICS_ControlPage = "Tools", LINKS_Name = "Save Settings", }, LoadSettings = { INP_Integer = false, INPID_InputControl = "ButtonControl", BTNCS_Execute = "local function split(str, ts)\n    if ts == nil then\n        return {}\n    end\n    local t = {}\n    i = 1\n    for s in string.gmatch(str, \"([^\" .. ts .. \"]+)\") do\n        t[i] = s\n        i = i + 1\n    end\n    return t\nend\nlocal function getToolName(st)\n    for key, v in pairs(st['Tools']) do\n        if (type(v) == 'table') and (v['Inputs'] ~= nil) then\n            return key\n        end\n    end\n    return nil\nend\n\nlocal node = self:GetTool()\nlocal path = fusion:RequestFile(\n    '',\n    '',\n    {\n        FReqB_SeqGather = false,\n        FReqS_Filter = 'Settings File (*.setting)|*.setting',\n        FReqS_Title = 'Load Settings',\n    }\n)\nif path then\n    local st = node:SaveSettings()\n    local filter_list = split(node:GetInput(\"Filter\"),'\\n')\n    local f_st = bmd.readfile(comp:MapPath(path))\n    local f_name = getToolName(f_st)\n    if f_name == nil then return end\n    for i, key in ipairs(filter_list) do\n        f_st['Tools'][f_name]['Inputs'][key] = st['Tools'][node.Name]['Inputs'][key]\n        local tmp = f_st['Tools'][f_name]['Inputs'][key]\n        if (type(tmp) == 'table') and (tmp['SourceOp'] ~= nil) then\n            local src = tmp['SourceOp']\n            f_st['Tools'][src] = st['Tools'][src]\n        end\n    end\n    node:LoadSettings(f_st)\n    print('Load: ' .. comp:MapPath(path))\nend\n", LINKID_DataType = "Number", ICS_ControlPage = "Tools", LINKS_Name = "Load Settings", }, Filter = { TEC_ReadOnly = false, INPID_InputControl = "TextEditControl", INP_Default = "StyledText\nWidth\nHeight\nUseFrameFormatSettings\nFilter", INP_External = false, LINKID_DataType = "Text", TEC_Wrap = false, INP_Passive = true, ICS_ControlPage = "Tools", LINKS_Name = "Filter", } }
+		}
+	}
+}

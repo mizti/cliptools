@@ -15,5 +15,6 @@ clip*
 tmp*.json
 tmp_transcription.json
 materials/*
+!materials/TextPlusTemplates
 *.wav
 tools/*
