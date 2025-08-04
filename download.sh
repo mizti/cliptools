@@ -54,14 +54,15 @@ download_video() {
   yt-dlp \
     -f 'bestvideo+bestaudio/best' \
     --merge-output-format mp4 \
-    --write-subs \
     --cookies-from-browser chrome \
-    --write-auto-sub \
-    --sub-lang en,ja \
-    --convert-subs srt \
     --output "$output_path" \
     "$video_url"
+    #--convert-subs srt \
+    #--write-auto-sub \
+    #--write-subs \
+    #--sub-lang en \
     #--extractor-args "youtube:player_client=ios" \
+    #--sub-lang en,ja \
 }
 
 # Function to download audio only
@@ -72,6 +73,7 @@ download_audio() {
     -f bestaudio \
     --extract-audio \
     --cookies-from-browser chrome \
+    --sleep-requests 2 --max-sleep-interval 5 \
     --audio-format mp3 \
     --output "$output_path" \
     "$audio_url"

@@ -1,0 +1,67 @@
+{
+	Tools = ordered() {
+		Template = TextPlus {
+			CtrlWZoom = false,
+			Inputs = {
+				GlobalOut = Input { Value = 187, },
+				Width = Input { Value = 1080, },
+				Height = Input { Value = 1920, },
+				UseFrameFormatSettings = Input { Value = 1, },
+				LayoutType = Input { Value = 1, },
+				Center = Input { Value = { 0.5, 0.892 }, },
+				LayoutSize = Input {
+					SourceOp = "Template_1LayoutSize",
+					Source = "Value",
+				},
+				LayoutWidth = Input { Value = 0.913, },
+				LineSpacing = Input { Value = 0.9, },
+				WordSpacing = Input { Value = 0.95, },
+				CharacterSpacing = Input { Value = 0.95, },
+				SelectElement = Input { Value = 1, },
+				Select = Input { Value = 1, },
+				Name2 = Input { Value = "Color Outline", },
+				Enabled2 = Input { Value = 1, },
+				Enabled3 = Input { Value = 1, },
+				Name4 = Input { Value = "Black Border", },
+				Enabled4 = Input { Value = 1, },
+				StyledText = Input { Value = "And then Speaking of takoyaki, \nthough, I keep running into \nKanade in the studio.", },
+				Font = Input { Value = "LightNovelPopV2", },
+				Style = Input { Value = "V2", },
+				Size = Input { Value = 0.1058, },
+				VerticalJustificationNew = Input { Value = 3, },
+				HorizontalJustificationNew = Input { Value = 3, },
+				TabSpacing = Input { Value = 1, },
+				AdvancedFontControls = Input { Value = 1, },
+				ForceMonospaced = Input { Value = 0.2, },
+				Filter = Input { Value = "StyledText\nWidth\nHeight\nUseFrameFormatSettings\nFilter", },
+				Overlap2 = Input { Value = 0, },
+				Thickness2 = Input { Value = 0.25, },
+				OutsideOnly2 = Input { Value = 1, },
+				Red2 = Input { Value = 0.588235294117647, },
+				Green2 = Input { Value = 0.513725490196078, },
+				Blue2 = Input { Value = 0.901960784313726, },
+				Softness2 = Input { Value = 1, },
+				Softness3 = Input { Value = 1, },
+				SoftnessGlow3 = Input { Value = 0.417, },
+				ElementShape4 = Input { Value = 1, },
+				Thickness4 = Input { Value = 0.1, },
+				OutsideOnly4 = Input { Value = 1, },
+				Blue4 = Input { Value = 0, },
+				Softness4 = Input { Value = 1, },
+				PriorityBack4 = Input { Value = 19.88, }
+			},
+			ViewInfo = OperatorInfo { Pos = { 220, 49.5 } },
+			UserControls = ordered() { SaveSettings = { INP_Integer = false, INPID_InputControl = "ButtonControl", BTNCS_Execute = "local node = self:GetTool()\nlocal path = fusion:RequestFile(\n    '',\n    node.Name .. '.setting',\n    {\n        FReqB_Saving = true,\n        FReqB_SeqGather = false,\n        FReqS_Filter = 'Settings File (*.setting)|*.setting',\n        FReqS_Title = 'Save Settings',\n    }\n)\nif path then\n    node:SaveSettings(comp:MapPath(path))\n    print('Save: ' .. comp:MapPath(path))\nend\n", LINKID_DataType = "Number", ICS_ControlPage = "Tools", LINKS_Name = "Save Settings", }, LoadSettings = { INP_Integer = false, INPID_InputControl = "ButtonControl", BTNCS_Execute = "local function split(str, ts)\n    if ts == nil then\n        return {}\n    end\n    local t = {}\n    i = 1\n    for s in string.gmatch(str, \"([^\" .. ts .. \"]+)\") do\n        t[i] = s\n        i = i + 1\n    end\n    return t\nend\nlocal function getToolName(st)\n    for key, v in pairs(st['Tools']) do\n        if (type(v) == 'table') and (v['Inputs'] ~= nil) then\n            return key\n        end\n    end\n    return nil\nend\n\nlocal node = self:GetTool()\nlocal path = fusion:RequestFile(\n    '',\n    '',\n    {\n        FReqB_SeqGather = false,\n        FReqS_Filter = 'Settings File (*.setting)|*.setting',\n        FReqS_Title = 'Load Settings',\n    }\n)\nif path then\n    local st = node:SaveSettings()\n    local filter_list = split(node:GetInput(\"Filter\"),'\\n')\n    local f_st = bmd.readfile(comp:MapPath(path))\n    local f_name = getToolName(f_st)\n    if f_name == nil then return end\n    for i, key in ipairs(filter_list) do\n        f_st['Tools'][f_name]['Inputs'][key] = st['Tools'][node.Name]['Inputs'][key]\n        local tmp = f_st['Tools'][f_name]['Inputs'][key]\n        if (type(tmp) == 'table') and (tmp['SourceOp'] ~= nil) then\n            local src = tmp['SourceOp']\n            f_st['Tools'][src] = st['Tools'][src]\n        end\n    end\n    node:LoadSettings(f_st)\n    print('Load: ' .. comp:MapPath(path))\nend\n", LINKID_DataType = "Number", ICS_ControlPage = "Tools", LINKS_Name = "Load Settings", }, Filter = { TEC_ReadOnly = false, INPID_InputControl = "TextEditControl", INP_Default = "StyledText\nWidth\nHeight\nUseFrameFormatSettings\nFilter", INP_External = false, LINKID_DataType = "Text", TEC_Wrap = false, INP_Passive = true, ICS_ControlPage = "Tools", LINKS_Name = "Filter", } }
+		},
+		Template_1LayoutSize = BezierSpline {
+			SplineColor = { Red = 146, Green = 194, Blue = 241 },
+			CtrlWZoom = false,
+			NameSet = true,
+			KeyFrames = {
+				[0] = { 0, RH = { 1, 0.266666666666667 }, Flags = { Linear = true } },
+				[3] = { 0.8, LH = { 2, 0.533333333333333 }, RH = { 3.66666666666667, 0.788666666666667 }, Flags = { Linear = true } },
+				[5] = { 0.766, LH = { 4.33333333333333, 0.777333333333333 }, Flags = { Linear = true } }
+			}
+		}
+	}
+}
