@@ -51,7 +51,8 @@ mkdir -p "$OUTPUT_DIR"
 download_video() {
   local video_url="$1"
   local output_path="$2"
-  yt-dlp \
+yt-dlp -U && \
+    yt-dlp \
     -f 'bestvideo+bestaudio/best' \
     --merge-output-format mp4 \
     --cookies-from-browser chrome \
@@ -69,7 +70,8 @@ download_video() {
 download_audio() {
   local audio_url="$1"
   local output_path="${2%.*}.mp3"
-  yt-dlp \
+yt-dlp -U && \
+    yt-dlp \
     -f bestaudio \
     --extract-audio \
     --cookies-from-browser chrome \
