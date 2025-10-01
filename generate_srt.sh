@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 ###############################################################################
-# generate_srt.sh  (diagnostic-based minimal edition 2025-05-28 rev-2-fix)
+# generate_srt.sh  (diagnostic-based minimal edition 2025-05-28 rev-3-locale-branch)
 #
 # 追加／変更点
 #   • --skip-authorization-header を az rest 全呼び出しに付与   → ①警告解消
 #   • STEP 2 でコンテナ内ファイルを一括削除                     → ②
 #   • すべての資格情報を環境変数で参照（az login 不要）        → ③
 #   • trap を関数 err_trap() に分離して syntax error を回避
+#   • STEP 10 で ja / en を分岐（ロジックは同一、将来変更に備え）
 ###############################################################################
 set -Eeuo pipefail
 [[ ${TRACE:-0} -eq 1 ]] && set -x            # TRACE=1 で bash -x
@@ -23,11 +24,11 @@ err_trap() {
 }
 trap err_trap ERR
 
-# ---- 引数処理 ---------------------------------------------------------------
-usage(){ cat <<USG >&2
-Usage: $0 [-m MIN -M MAX | -n N] <audio.wav|audio.mp4> [en-US|ja-JP]
-USG
-  exit 1; }
+# ---- 引数処理 -----------------------------------------------------------------
+usage(){
+  echo "Usage: $0 [-n NUM] [-m MIN] [-M MAX] <audio.(wav|mp4)> [en-US|ja-JP]" >&2
+  exit 1
+}
 MIN_SPK=""; MAX_SPK=""; BOTH_SPK=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -35,6 +36,7 @@ while [[ $# -gt 0 ]]; do
     -m) MIN_SPK="$2";  shift 2 ;;
     -M) MAX_SPK="$2";  shift 2 ;;
     --) shift; break ;;
+    -h|--help) usage ;;
     -*) usage ;;
     *)  break ;;
   esac
@@ -51,7 +53,7 @@ MONO="${DIR}/${BASE}_mono.wav"
 TMP_JSON="tmp_script.json"
 start_ts=$(date +%s)
 
-# ---- 必須環境変数 -----------------------------------------------------------
+# ---- 必須環境変数 -------------------------------------------------------------
 step "env var check"
 for v in STORAGE_ACCOUNT_NAME STORAGE_ACCOUNT_KEY CONTAINER_NAME \
          SPEECH_REGION SPEECH_KEY; do
@@ -159,26 +161,46 @@ done
 step "Merge → $TMP_JSON"
 jq -s '[ .[] .recognizedPhrases[] ]' "$TMP_DIR"/seg_*.json > "$TMP_JSON"
 
-# ---- 10 SRT -----------------------------------------------------------------
+# ---- 10 SRT ------------------------------------------------------------------
 step "Generate SRT"
 SPKS=$(jq -r '.[].speaker // empty' "$TMP_JSON" | sort -nu)
 LAST_OUT=""
 for sp in $SPKS; do
   OUT="${DIR}/Speaker${sp}_${LOCALE}.srt"
   LAST_OUT="$OUT"
-  jq -r --arg sp "$sp" '
-    def tosec: capture("PT((?<h>[0-9.]+)H)?((?<m>[0-9.]+)M)?((?<s>[0-9.]+)S)?")
-      | ((.h//"0"|tonumber)*3600)+((.m//"0"|tonumber)*60)+(.s//"0"|tonumber);
-    [ .[] | select(.speaker == ($sp|tonumber))
-      | (.offset|tosec) as $st | (.duration|tosec) as $du
-      | {start:$st,end:($st+$du),text:.nBest[0].display} ]
-      | sort_by(.start)[] | "\(.start)\t\(.end)\t\(.text)"
-  ' "$TMP_JSON" | awk -F'\t' '
+
+  if [[ "$LOCALE" == "ja-JP" ]]; then
+    # ---- 日本語：recognizedPhrases 単位でそのまま ----
+    jq -r --arg sp "$sp" '
+      def tosec: capture("PT((?<h>[0-9.]+)H)?((?<m>[0-9.]+)M)?((?<s>[0-9.]+)S)?")
+        | ((.h//"0"|tonumber)*3600)+((.m//"0"|tonumber)*60)+(.s//"0"|tonumber);
+      [ .[] | select(.speaker == ($sp|tonumber))
+        | (.offset|tosec) as $st | (.duration|tosec) as $du
+        | {start:$st,end:($st+$du),text:.nBest[0].display} ]
+        | sort_by(.start)[] | "\(.start)\t\(.end)\t\(.text)"
+    ' "$TMP_JSON" | awk -F'\t' '
       function ts(t){h=int(t/3600);m=int((t-h*3600)/60);
         s=int(t-h*3600-m*60);ms=int((t-int(t))*1000);
         return sprintf("%02d:%02d:%02d,%03d",h,m,s,ms)}
       {printf("%d\n%s --> %s\n%s\n\n", NR, ts($1), ts($2), $3)}
-  ' > "$OUT"
+    ' > "$OUT"
+
+  else
+    # ---- 英語：将来変更に備え、今は同ロジック ----
+    jq -r --arg sp "$sp" '
+      def tosec: capture("PT((?<h>[0-9.]+)H)?((?<m>[0-9.]+)M)?((?<s>[0-9.]+)S)?")
+        | ((.h//"0"|tonumber)*3600)+((.m//"0"|tonumber)*60)+(.s//"0"|tonumber);
+      [ .[] | select(.speaker == ($sp|tonumber))
+        | (.offset|tosec) as $st | (.duration|tosec) as $du
+        | {start:$st,end:($st+$du),text:.nBest[0].display} ]
+        | sort_by(.start)[] | "\(.start)\t\(.end)\t\(.text)"
+    ' "$TMP_JSON" | awk -F'\t' '
+      function ts(t){h=int(t/3600);m=int((t-h*3600)/60);
+        s=int(t-h*3600-m*60);ms=int((t-int(t))*1000);
+        return sprintf("%02d:%02d:%02d,%03d",h,m,s,ms)}
+      {printf("%d\n%s --> %s\n%s\n\n", NR, ts($1), ts($2), $3)}
+    ' > "$OUT"
+  fi
 done
 
 # ---- 11 Cleanup & Report ----------------------------------------------------
