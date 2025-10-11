@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-英語 SRT を 50 行ごとに GPT-4o へ投げ、日本語 SRT を
+英語 SRT を 50 行ごとに GPT へ投げ、日本語 SRT を
 逐次ファイルへ追記しながら完成させるスクリプト
 
 Usage:
@@ -37,11 +37,11 @@ dst_path.touch()                # 空ファイルを生成
 
 # ─────────────── Azure OpenAI クライアント ──────────────────────────────────
 client = AzureOpenAI(
-    azure_endpoint=os.getenv("ENDPOINT_URL",          "https://ks-ai-foundry.openai.azure.com/"),
+    azure_endpoint=os.getenv("ENDPOINT_URL", "https://ks-ai-foundry.openai.azure.com/"),
     api_key       =os.getenv("AZURE_OPENAI_API_KEY"),
     api_version   ="2025-01-01-preview",
 )
-deployment = os.getenv("DEPLOYMENT_NAME", "gpt-4o")
+deployment = os.getenv("DEPLOYMENT_NAME", "gpt-5-chat")
 
 # ─────────────── システムプロンプト読み込み ─────────────────────────────────
 prompt_path = Path("settings/system_prompt.txt")
@@ -61,7 +61,7 @@ def chunks(lst: List[str], n: int):
 
 total_chunks = (len(lines) + args.chunk - 1) // args.chunk   # 進捗バー用
 
-# ─────────────── GPT-4o へ逐次リクエスト ───────────────────────────────────
+# ─────────────── GPT へ逐次リクエスト ───────────────────────────────────
 for idx, block in enumerate(
         tqdm.tqdm(chunks(lines, args.chunk),
                   total=total_chunks,
