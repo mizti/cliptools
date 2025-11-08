@@ -75,7 +75,7 @@ yt-dlp -U && \
     -f bestaudio \
     --extract-audio \
     --cookies-from-browser chrome \
-    --sleep-requests 2 --max-sleep-interval 5 \
+    --sleep-requests 2 --min-sleep-interval 1 --max-sleep-interval 5 \
     --audio-format mp3 \
     --output "$output_path" \
     "$audio_url"
