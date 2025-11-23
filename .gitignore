@@ -18,3 +18,4 @@ materials/*
 !materials/TextPlusTemplates
 *.wav
 tools/*
+node_modules/*
