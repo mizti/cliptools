@@ -103,6 +103,24 @@ step "Create transcription"
 ENDP="https://${SPEECH_REGION}.api.cognitive.microsoft.com"
 API="speechtotext/v3.2/transcriptions"
 BODY=$(mktemp)
+if [[ -n ${SPEECH_CUSTOM_MODEL_SELF:-} ]]; then
+cat >"$BODY" <<JSON
+{
+  "displayName":"$BASE",
+  "locale":"$LOCALE",
+  "contentContainerUrl":"$CONT_URL",
+  "model":{ "self":"$SPEECH_CUSTOM_MODEL_SELF" },
+  "properties":{
+    "diarizationEnabled":true,
+    "wordLevelTimestampsEnabled":true,
+    "punctuationMode":"DictatedAndAutomatic",
+    "profanityFilterMode":"Masked",
+    "channels":[0],
+    "diarization":{"speakers":{"minCount":$MIN_SPK,"maxCount":$MAX_SPK}}
+  }
+}
+JSON
+else
 cat >"$BODY" <<JSON
 {
   "displayName":"$BASE",
@@ -118,6 +136,7 @@ cat >"$BODY" <<JSON
   }
 }
 JSON
+fi
 REST_OPTS=(--skip-authorization-header --method post --uri "$ENDP/$API" \
   --headers "Ocp-Apim-Subscription-Key=$SPEECH_KEY" --body @"$BODY")
 [[ $DEBUG == true ]] && REST_OPTS+=(--debug)
@@ -169,38 +188,114 @@ for sp in $SPKS; do
   OUT="${DIR}/Speaker${sp}_${LOCALE}.srt"
   LAST_OUT="$OUT"
 
-  if [[ "$LOCALE" == "ja-JP" ]]; then
-    # ---- 日本語：recognizedPhrases 単位でそのまま ----
-    jq -r --arg sp "$sp" '
-      def tosec: capture("PT((?<h>[0-9.]+)H)?((?<m>[0-9.]+)M)?((?<s>[0-9.]+)S)?")
-        | ((.h//"0"|tonumber)*3600)+((.m//"0"|tonumber)*60)+(.s//"0"|tonumber);
-      [ .[] | select(.speaker == ($sp|tonumber))
-        | (.offset|tosec) as $st | (.duration|tosec) as $du
-        | {start:$st,end:($st+$du),text:.nBest[0].display} ]
-        | sort_by(.start)[] | "\(.start)\t\(.end)\t\(.text)"
-    ' "$TMP_JSON" | awk -F'\t' '
-      function ts(t){h=int(t/3600);m=int((t-h*3600)/60);
-        s=int(t-h*3600-m*60);ms=int((t-int(t))*1000);
-        return sprintf("%02d:%02d:%02d,%03d",h,m,s,ms)}
-      {printf("%d\n%s --> %s\n%s\n\n", NR, ts($1), ts($2), $3)}
-    ' > "$OUT"
+  # ---- 共通ロジック：recognizedPhrases → 細かい SRT ブロック ----
+  # 1 フレーズをそのまま 1 ブロックにせず、30〜100 文字程度で文脈の良さそうな位置
+  # （句読点やスペース付近）で分割する。
+  jq -r --arg sp "$sp" '
+    def tosec: capture("PT((?<h>[0-9.]+)H)?((?<m>[0-9.]+)M)?((?<s>[0-9.]+)S)?")
+      | ((.h//"0"|tonumber)*3600)+((.m//"0"|tonumber)*60)+(.s//"0"|tonumber);
+    [ .[] | select(.speaker == ($sp|tonumber))
+      | (.offset|tosec) as $st | (.duration|tosec) as $du
+      | {start:$st,end:($st+$du),text:.nBest[0].display} ]
+      | sort_by(.start)[] | "\(.start)\t\(.end)\t\(.text)"
+  ' "$TMP_JSON" | awk -F'\t' '
+    # t を "HH:MM:SS,mmm" に変換
+    function ts(t){h=int(t/3600);m=int((t-h*3600)/60);
+      s=int(t-h*3600-m*60);ms=int((t-int(t))*1000);
+      return sprintf("%02d:%02d:%02d,%03d",h,m,s,ms)}
 
-  else
-    # ---- 英語：将来変更に備え、今は同ロジック ----
-    jq -r --arg sp "$sp" '
-      def tosec: capture("PT((?<h>[0-9.]+)H)?((?<m>[0-9.]+)M)?((?<s>[0-9.]+)S)?")
-        | ((.h//"0"|tonumber)*3600)+((.m//"0"|tonumber)*60)+(.s//"0"|tonumber);
-      [ .[] | select(.speaker == ($sp|tonumber))
-        | (.offset|tosec) as $st | (.duration|tosec) as $du
-        | {start:$st,end:($st+$du),text:.nBest[0].display} ]
-        | sort_by(.start)[] | "\(.start)\t\(.end)\t\(.text)"
-    ' "$TMP_JSON" | awk -F'\t' '
-      function ts(t){h=int(t/3600);m=int((t-h*3600)/60);
-        s=int(t-h*3600-m*60);ms=int((t-int(t))*1000);
-        return sprintf("%02d:%02d:%02d,%03d",h,m,s,ms)}
-      {printf("%d\n%s --> %s\n%s\n\n", NR, ts($1), ts($2), $3)}
-    ' > "$OUT"
-  fi
+    # 1 ブロックあたりの目安長さ
+    BEGIN{
+      MINLEN=30; MAXLEN=100;
+      idx=0;
+    }
+
+    # 文字列 s の中で、pos 付近の良さそうな切れ目（句読点＋スペースなど）を探す
+    function find_cut(s, pos,    i, n, c){
+      n=length(s);
+      if (n <= MAXLEN) return n;   # そもそも短いときは末尾
+
+      # まずは pos から右方向に探す
+      for (i=pos; i<=n; i++){
+        c=substr(s,i,1);
+        if (c ~ /[.!?]/ && substr(s,i+1,1) ~ /[[:space:]]/){
+          return i; # 句読点＋空白
+        }
+        if (c ~ /[,;]/ && substr(s,i+1,1) ~ /[[:space:]]/ && i-pos >= MINLEN){
+          return i; # カンマ系（ある程度進んでいれば採用）
+        }
+      }
+
+      # 見つからなければ、左方向に戻ってスペースか句読点を探す
+      for (i=pos; i>0; i--){
+        c=substr(s,i,1);
+        if (c ~ /[.!?,;]/){
+          return i;
+        }
+        if (c ~ /[[:space:]]/ && i>=MINLEN){
+          return i;
+        }
+      }
+
+      # どうしても見つからなければ MAXLEN で強制分割
+      if (n > MAXLEN) return MAXLEN;
+      return n;
+    }
+
+    {
+      start=$1; end=$2; text=$3;
+      # 行頭・行末の余計な空白を削除
+      gsub(/^ +/, "", text);
+      gsub(/ +$/, "", text);
+      dur=end-start;
+      len=length(text);
+
+      # 30〜100 文字以内ならそのまま 1 ブロック
+      if (len <= MAXLEN && len >= MINLEN){
+        idx++;
+        printf("%d\n%s --> %s\n%s\n\n", idx, ts(start), ts(end), text);
+        next;
+      }
+
+      # すごく短い文（←ノイズ的なもの）は、いったんそのまま出す
+      # （後処理で前のブロックとマージするなどの拡張余地あり）
+      if (len < MINLEN){
+        idx++;
+        printf("%d\n%s --> %s\n%s\n\n", idx, ts(start), ts(end), text);
+        next;
+      }
+
+      # 長すぎる文は、テキスト長に応じて時間を均等分割
+      pos=1; abs_end=end;
+      while (pos <= len){
+        # 残りテキストの長さ
+        rest_len=len-pos+1;
+        if (rest_len <= MAXLEN){
+          seg=text;
+          sub("^.{" pos-1 "}", "", seg);   # 先頭 pos-1 文字を削除
+          idx++;
+          printf("%d\n%s --> %s\n%s\n\n", idx, ts(start), ts(abs_end), seg);
+          break;
+        }
+
+        # 目安位置は pos+MAXLEN 付近
+        hint=pos+MAXLEN;
+        cut=find_cut(text, hint);
+        seg=substr(text, pos, cut-pos+1);
+
+        # 区間の比率で時間を割り当て（大雑把に）
+        ratio=(cut-pos+1)/len;
+        seg_dur=dur*ratio;
+        seg_end=start+seg_dur;
+
+        idx++;
+        printf("%d\n%s --> %s\n%s\n\n", idx, ts(start), ts(seg_end), seg);
+
+        start=seg_end;
+        pos=cut+1;
+      }
+    }
+  ' > "$OUT"
 done
 
 # ---- 11 Cleanup & Report ----------------------------------------------------
