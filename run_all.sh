@@ -103,7 +103,13 @@ if [[ -n $URL ]]; then
   $AUDIO_ONLY && DL_ARGS+=(-w)
 
   echo "▶ 1/3 download.sh"
-  ./download.sh "$URL" "${DL_ARGS[@]}" "$OUTDIR" "$BASENAME"  # :contentReference[oaicite:1]{index=1}
+  # zsh + set -u だと、空配列の "${DL_ARGS[@]}" 展開が unbound 扱いになることがあるため、
+  # 要素数を見て分岐させてから download.sh を呼び出す。
+  if [[ ${#DL_ARGS[@]} -gt 0 ]]; then
+    ./download.sh "$URL" "${DL_ARGS[@]}" "$OUTDIR" "$BASENAME"  # :contentReference[oaicite:1]{index=1}
+  else
+    ./download.sh "$URL" "$OUTDIR" "$BASENAME"  # オプションなし
+  fi
 
   EXT=$($AUDIO_ONLY && echo "mp3" || echo "mp4")
   MEDIA_PATH="${OUTDIR%/}/${BASENAME}.${EXT}"
@@ -123,7 +129,14 @@ GEN_ARGS=()
 [[ -n $FIX_SPK ]] && GEN_ARGS+=( -n "$FIX_SPK" )
 [[ -n $MIN_SPK ]] && GEN_ARGS+=( -m "$MIN_SPK" )
 [[ -n $MAX_SPK ]] && GEN_ARGS+=( -M "$MAX_SPK" )
-./generate_srt.sh "${GEN_ARGS[@]}" "$MEDIA_PATH" "$LOCALE"       # :contentReference[oaicite:2]{index=2}
+
+# zsh + set -u だと、空配列の "${GEN_ARGS[@]}" 展開が unbound 扱いになることがあるため、
+# 要素数を見て分岐させてから generate_srt.sh を呼び出す。
+if [[ ${#GEN_ARGS[@]} -gt 0 ]]; then
+  ./generate_srt.sh "${GEN_ARGS[@]}" "$MEDIA_PATH" "$LOCALE"       # :contentReference[oaicite:2]{index=2}
+else
+  ./generate_srt.sh "$MEDIA_PATH" "$LOCALE"       # オプションなし
+fi
 
 # 生成された SRT 一覧
 SRT_PATTERN="Speaker*_${LOCALE}.srt"

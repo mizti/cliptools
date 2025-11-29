@@ -93,10 +93,10 @@ total_chunks = (len(lines) + args.chunk - 1) // args.chunk   # 進捗バー用
 # ─────────────── GPT へ逐次リクエスト ───────────────────────────────────
 for idx, block in enumerate(
     tqdm.tqdm(group_srt_blocks(lines, BLOCKS_PER_REQUEST),
-          desc="Translating"), start=1):
+        desc="Translating"), start=1):
 
-    # f
-    block_text = "\n" + "".join(block) + "\n"
+    # モデルに渡すテキストの前後に余計な空行を付けない
+    block_text = "".join(block)
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": block_text}
@@ -137,9 +137,11 @@ for idx, block in enumerate(
         #   出力 SRT のポリシー（行末に句点を付けない）を守る。
         content = content.replace("。", "")
 
-    # ― (2) 逐次追記＋ブロック間に必ず空行を 1 行入れる ―
+    # ― (2) 逐次追記＋ブロック間に必ず空行を 1 行入れる（先頭は空行にしない） ―
     with dst_path.open('a', encoding='utf-8') as f_out:
-        f_out.write('\n')         # 追加の空行
+        # ファイルが空でなければ、前ブロックとの間に 1 行の空行を入れる
+        if dst_path.stat().st_size > 0:
+            f_out.write('\n')
         f_out.write(content)
         f_out.write('\n')         # 追加の空行
         f_out.flush()
