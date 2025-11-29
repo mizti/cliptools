@@ -57,6 +57,7 @@ yt-dlp -U && \
     -f "bv*+ba/b" \
     --merge-output-format mp4 \
     --cookies-from-browser chrome \
+    --remote-components ejs:github \
     --output "$output_path" \
     "$video_url"
     #--convert-subs srt \
