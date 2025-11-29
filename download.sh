@@ -53,7 +53,8 @@ download_video() {
   local output_path="$2"
 yt-dlp -U && \
     yt-dlp \
-    -f 'bestvideo+bestaudio/best' \
+    -S "vcodec:h264,acodec:m4a" \
+    -f "bv*+ba/b" \
     --merge-output-format mp4 \
     --cookies-from-browser chrome \
     --output "$output_path" \

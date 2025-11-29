@@ -22,6 +22,19 @@
 
 #### 準備
 
+#### Pythonとjs周りの整備
+
+```bash
+brew install pyenv deno
+```
+
+適宜pyenvでpython3.xをインストールする
+
+```bash
+pip install -r requirements.txt
+```
+
+#### Azureの準備
 それぞれ外部のドキュメントを参照して
 * Azureのサブスクリプションを作成
 * Azure CLIのインストール

@@ -1,11 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-英語 SRT を 50 行ごとに GPT へ投げ、日本語 SRT を
-逐次ファイルへ追記しながら完成させるスクリプト
+"""英語 SRT を GPT で日本語に翻訳するスクリプト。
 
-Usage:
-    python translate_srt_gpt.py -i input.srt -o ./out
+SRT を「字幕ブロック」単位（連番・タイムスタンプ・セリフ群・空行）で分割し、
+20 ブロックずつまとめて生成 AI に投げます。
 """
 
 import os
@@ -17,6 +15,37 @@ from typing import List
 
 from openai import AzureOpenAI      # pip install openai>=1.0
 import tqdm                         # pip install tqdm
+
+
+def group_srt_blocks(lst: List[str], blocks_per_group: int):
+    """SRT の行リストを「字幕ブロック」を単位としてまとめて返すジェネレータ。
+
+    1 ブロック = 連番行 + タイムスタンプ行 + セリフ数行 + 空行
+    という前提で、「空行が来たら 1 ブロック終了」とみなし、
+    それを blocks_per_group 個ずつ連結して 1 グループとして yield します。
+    """
+    current_block: List[str] = []
+    blocks: List[List[str]] = []
+
+    for line in lst:
+        current_block.append(line)
+        # 空行で 1 ブロック終了とみなす
+        if line.strip() == "":
+            blocks.append(current_block)
+            current_block = []
+
+    # ファイル末尾に空行が無くても最後のブロックを拾う
+    if current_block:
+        blocks.append(current_block)
+
+    # blocks_per_group 個ずつまとめて 1 リクエスト分のテキストにする
+    for i in range(0, len(blocks), blocks_per_group):
+        group = []
+        for b in blocks[i:i + blocks_per_group]:
+            group.extend(b)
+        yield group
+BLOCKS_PER_REQUEST = 20
+
 
 # ───────────────── CLI ──────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
@@ -63,11 +92,11 @@ total_chunks = (len(lines) + args.chunk - 1) // args.chunk   # 進捗バー用
 
 # ─────────────── GPT へ逐次リクエスト ───────────────────────────────────
 for idx, block in enumerate(
-        tqdm.tqdm(chunks(lines, args.chunk),
-                  total=total_chunks,
-                  desc="Translating"), start=1):
+    tqdm.tqdm(group_srt_blocks(lines, BLOCKS_PER_REQUEST),
+          desc="Translating"), start=1):
 
-    block_text = "".join(block)
+    # f
+    block_text = "\n" + "".join(block) + "\n"
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": block_text}
@@ -102,6 +131,11 @@ for idx, block in enumerate(
         if content is None:
             print(f"[WARN] block {idx}: skipped or filtered: finish_reason={reason}", file=sys.stderr)
             content = f"[BLOCKED: {reason}]"
+
+        # ― 念のため、生成された本文から全角の句点「。」を除去してから書き出す ―
+        #   GPT が指示に反して句点を付けてしまった場合でも、ここで落とすことで
+        #   出力 SRT のポリシー（行末に句点を付けない）を守る。
+        content = content.replace("。", "")
 
     # ― (2) 逐次追記＋ブロック間に必ず空行を 1 行入れる ―
     with dst_path.open('a', encoding='utf-8') as f_out:

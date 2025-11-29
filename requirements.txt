@@ -1,2 +1,2 @@
 openai
-yt-dlp
+yt-dlp[default]
