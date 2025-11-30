@@ -16,35 +16,7 @@ from typing import List
 from openai import AzureOpenAI      # pip install openai>=1.0
 import tqdm                         # pip install tqdm
 
-
-def group_srt_blocks(lst: List[str], blocks_per_group: int):
-    """SRT の行リストを「字幕ブロック」を単位としてまとめて返すジェネレータ。
-
-    1 ブロック = 連番行 + タイムスタンプ行 + セリフ数行 + 空行
-    という前提で、「空行が来たら 1 ブロック終了」とみなし、
-    それを blocks_per_group 個ずつ連結して 1 グループとして yield します。
-    """
-    current_block: List[str] = []
-    blocks: List[List[str]] = []
-
-    for line in lst:
-        current_block.append(line)
-        # 空行で 1 ブロック終了とみなす
-        if line.strip() == "":
-            blocks.append(current_block)
-            current_block = []
-
-    # ファイル末尾に空行が無くても最後のブロックを拾う
-    if current_block:
-        blocks.append(current_block)
-
-    # blocks_per_group 個ずつまとめて 1 リクエスト分のテキストにする
-    for i in range(0, len(blocks), blocks_per_group):
-        group = []
-        for b in blocks[i:i + blocks_per_group]:
-            group.extend(b)
-        yield group
-BLOCKS_PER_REQUEST = 20
+from utils.srt_parser import SRTBlock, blocks_to_text, parse_srt_blocks, validate_srt
 
 
 # ───────────────── CLI ──────────────────────────────────────────────────────
@@ -95,22 +67,31 @@ if not prompt_path.is_file():
 system_prompt = prompt_path.read_text(encoding='utf-8').strip()
 
 # ─────────────── SRT 読み込み＆分割 ────────────────────────────────────────
-lines = src_path.read_text(encoding='utf-8').splitlines(keepends=True)
+src_text = src_path.read_text(encoding='utf-8')
+blocks: List[SRTBlock] = parse_srt_blocks(src_text)
+if not blocks:
+    print("[ERROR] No parsable SRT blocks in input; aborting.", file=sys.stderr)
+    sys.exit(1)
 
-def chunks(lst: List[str], n: int):
-    """Yield n-sized chunks from lst."""
-    for i in range(0, len(lst), n):
-        yield lst[i:i + n]
 
-total_chunks = (len(lines) + args.chunk - 1) // args.chunk   # 進捗バー用
+def chunk_blocks(seq: List[SRTBlock], size: int) -> List[List[SRTBlock]]:
+    """Chunk SRT blocks into groups of at most `size` blocks each."""
+
+    return [seq[i : i + size] for i in range(0, len(seq), size)]
+
+
+BLOCKS_PER_REQUEST = 20
+
+total_chunks = (len(blocks) + BLOCKS_PER_REQUEST - 1) // BLOCKS_PER_REQUEST
 
 # ─────────────── GPT へ逐次リクエスト ───────────────────────────────────
-for idx, block in enumerate(
-    tqdm.tqdm(group_srt_blocks(lines, BLOCKS_PER_REQUEST),
-        desc="Translating"), start=1):
+for idx, block_group in enumerate(
+    tqdm.tqdm(chunk_blocks(blocks, BLOCKS_PER_REQUEST), desc="Translating"), start=1
+):
 
-    # モデルに渡すテキストの前後に余計な空行を付けない
-    block_text = "".join(block)
+    # モデルに渡すテキストの前後に余計な空行を付けない。
+    # 各チャンクは SRT として構造を保った部分文字列になる。
+    block_text = blocks_to_text(block_group)
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": block_text}
@@ -151,16 +132,52 @@ for idx, block in enumerate(
         #   出力 SRT のポリシー（行末に句点を付けない）を守る。
         content = content.replace("。", "")
 
-    # ― (2) 逐次追記＋ブロック間に必ず空行を 1 行入れる（先頭は空行にしない） ―
-    with dst_path.open('a', encoding='utf-8') as f_out:
-        # ファイルが空でなければ、前ブロックとの間に 1 行の空行を入れる
-        if dst_path.stat().st_size > 0:
-            f_out.write('\n')
-        f_out.write(content)
-        f_out.write('\n')         # 追加の空行
-        f_out.flush()
+    # モデルの出力を SRT としてパースし、構造が壊れていないかを検証する。
+    ok_srt, srt_errors = validate_srt(content)
+    if not ok_srt:
+        print(
+            f"[WARN] chunk {idx}: translated text failed SRT validation; keeping original blocks.",
+            file=sys.stderr,
+        )
+        for msg in srt_errors[:5]:
+            print(f"    ! {msg}", file=sys.stderr)
+        continue
 
-    tqdm.tqdm.write(f"block {idx}: finish_reason={reason}")
+    fixed_blocks = parse_srt_blocks(content)
+    if not fixed_blocks:
+        print(
+            f"[WARN] chunk {idx}: no parsable SRT blocks in translation; keeping original blocks.",
+            file=sys.stderr,
+        )
+        continue
 
+    # index で対応付けし、タイムスタンプは元のブロックから引き継ぐ。
+    orig_by_index = {b.index: b for b in block_group if b.index is not None}
+    fixed_by_index = {b.index: b for b in fixed_blocks if b.index is not None}
+
+    if set(orig_by_index.keys()) != set(fixed_by_index.keys()):
+        print(
+            f"[WARN] chunk {idx}: index mismatch between original and translated; keeping original blocks.",
+            file=sys.stderr,
+        )
+        continue
+
+    for key in sorted(orig_by_index.keys()):
+        ob = orig_by_index[key]
+        fb = fixed_by_index[key]
+
+        # タイムスタンプは絶対に元のまま。
+        fb.start = ob.start
+        fb.end = ob.end
+
+        # 本文だけを差し替える。
+        ob.lines = fb.lines
+
+    tqdm.tqdm.write(f"chunk {idx}: finish_reason={reason}")
+
+
+# すべてのブロックのテキストを差し替えたので、まとめて SRT を書き出す。
+final_srt = blocks_to_text(blocks)
+dst_path.write_text(final_srt, encoding="utf-8")
 print(f"\n✅ Completed! → {dst_path.resolve()}")
 
