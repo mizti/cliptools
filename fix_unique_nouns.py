@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from openai import AzureOpenAI
 
+from utils.srt_parser import SRTBlock, blocks_to_text, parse_srt_blocks, validate_srt
+
 RED = "\033[31m"
 HIGHLIGHT = "\033[38;5;207m"  # bright magenta/pink-ish (after)
 B_BEFORE = "\033[38;5;39m"    # bright blue-ish (before)
@@ -68,39 +70,10 @@ def call_model(client: AzureOpenAI, deployment: str, system_prompt: str, diction
     return content
 
 
-def split_srt_into_blocks(srt_text: str) -> list[str]:
-    """Split an SRT file into a list of blocks, preserving order.
+def chunk_blocks(blocks: list[SRTBlock], size: int) -> list[list[SRTBlock]]:
+    """Return a list of SRTBlock chunks with at most `size` blocks each."""
 
-    Each block is separated by one or more blank lines. The trailing
-    newline of each block is preserved so simple concatenation reproduces
-    the original structure.
-    """
-
-    lines = srt_text.splitlines(keepends=True)
-    blocks: list[list[str]] = []
-    current: list[str] = []
-
-    for line in lines:
-        if line.strip() == "":
-            # Blank line -> block boundary
-            current.append(line)
-            if current:
-                blocks.append(current)
-                current = []
-        else:
-            current.append(line)
-
-    if current:
-        blocks.append(current)
-
-    # Join inner lists to strings
-    return ["".join(block) for block in blocks]
-
-
-def chunks(seq: list[str], size: int) -> list[list[str]]:
-    """Return a list of chunks (sublists) from seq with at most `size` items each."""
-
-    return [seq[i : i + size] for i in range(0, len(seq), size)]
+    return [blocks[i : i + size] for i in range(0, len(blocks), size)]
 
 
 def is_timestamp_line(line: str) -> bool:
@@ -173,18 +146,27 @@ def main() -> None:
 
     client = build_client()
 
-    # Split SRT into numbered blocks and process in chunks to avoid
-    # overloading the model with extremely long inputs.
-    all_blocks = split_srt_into_blocks(srt_text)
+    # Parse SRT into structured blocks and process in chunks to avoid
+    # overloading the model with extremely long inputs. We keep index
+    # and timestamps from the original blocks and only ever modify the
+    # text lines.
+    all_blocks = parse_srt_blocks(srt_text)
+    if not all_blocks:
+        print(
+            "[fix_proper_nouns_gpt] No parsable SRT blocks found; copying input to output.",
+            file=sys.stderr,
+        )
+        output_path.write_text(srt_text, encoding="utf-8")
+        return
+
     blocks_per_chunk = 100
     print(
         f"[fix_proper_nouns_gpt] Processing {len(all_blocks)} blocks in chunks of {blocks_per_chunk}...",
         file=sys.stderr,
     )
 
-    fixed_blocks: list[str] = []
-    for idx, block_group in enumerate(chunks(all_blocks, blocks_per_chunk), start=1):
-        chunk_srt = "".join(block_group)
+    for idx, block_group in enumerate(chunk_blocks(all_blocks, blocks_per_chunk), start=1):
+        chunk_srt = blocks_to_text(block_group)
         print(
             f"[fix_proper_nouns_gpt] Calling model '{args.deployment}' for chunk {idx} (blocks {len(block_group)})...",
             file=sys.stderr,
@@ -211,44 +193,71 @@ def main() -> None:
             )
             fixed_chunk = chunk_srt
 
-        # Extra safety: for any timestamp-looking line, force it back to
-        # the original even if the model changed it.
-        try:
-            fixed_lines_all = fixed_chunk.splitlines(keepends=True)
-            orig_lines_all = chunk_srt.splitlines(keepends=True)
-            if len(fixed_lines_all) == len(orig_lines_all):
-                for li, (o_line, f_line) in enumerate(zip(orig_lines_all, fixed_lines_all)):
-                    if is_timestamp_line(o_line.rstrip("\n")):
-                        fixed_lines_all[li] = o_line
-                fixed_chunk = "".join(fixed_lines_all)
-        except Exception as e:  # noqa: BLE001
+        # Parse model output back into blocks for this chunk.
+        fixed_blocks = parse_srt_blocks(fixed_chunk)
+        if not fixed_blocks:
             print(
-                f"[fix_proper_nouns_gpt] Warning: failed to enforce timestamp safety in chunk {idx}: {e}",
+                f"[fix_proper_nouns_gpt] Chunk {idx} produced no parsable blocks; keeping original chunk.",
                 file=sys.stderr,
             )
+            continue
 
-        # Diff logging: show only changed lines for this chunk, with
-        # word-level highlights for differences. This runs *after*
-        # timestamp safety correction, so timestamps in the diff
-        # represent what actually ends up in the file.
-        if fixed_chunk != chunk_srt:
-            orig_lines = chunk_srt.splitlines(keepends=False)
-            fixed_lines = fixed_chunk.splitlines(keepends=False)
+        ok, errors = validate_srt(fixed_chunk)
+        if not ok:
+            print(
+                f"[fix_proper_nouns_gpt] Chunk {idx} failed SRT validation; keeping original chunk.",
+                file=sys.stderr,
+            )
+            for msg in errors[:5]:
+                print(f"    ! {msg}", file=sys.stderr)
+            continue
+
+        # Align original and fixed blocks by index; timestamps from the
+        # original always win. We only adopt text changes.
+        orig_by_index: dict[int, SRTBlock] = {b.index: b for b in block_group if b.index is not None}
+        fixed_by_index: dict[int, SRTBlock] = {b.index: b for b in fixed_blocks if b.index is not None}
+
+        # If the sets of indices differ wildly, this chunk is suspicious.
+        if set(orig_by_index.keys()) != set(fixed_by_index.keys()):
+            print(
+                f"[fix_proper_nouns_gpt] Chunk {idx} index mismatch between original and fixed; keeping original chunk.",
+                file=sys.stderr,
+            )
+            continue
+
+        # Diff logging and text adoption per block.
+        for index_key in sorted(orig_by_index.keys()):
+            ob = orig_by_index[index_key]
+            fb = fixed_by_index[index_key]
+
+            # Always restore original timestamps on the fixed block.
+            if fb.start != ob.start or fb.end != ob.end:
+                print(
+                    f"[fix_proper_nouns_gpt] Chunk {idx} block index {index_key}: restoring timestamps "
+                    f"{fb.start} --> {fb.end} to {ob.start} --> {ob.end}",
+                    file=sys.stderr,
+                )
+                fb.start = ob.start
+                fb.end = ob.end
+
+            if ob.lines == fb.lines:
+                continue
+
+            # Block-level diff logging for text changes only.
+            orig_text = "\n".join(ob.lines)
+            fixed_text = "\n".join(fb.lines)
+            orig_lines = orig_text.splitlines(keepends=False)
+            fixed_lines = fixed_text.splitlines(keepends=False)
             matcher = difflib.SequenceMatcher(a=orig_lines, b=fixed_lines)
-            print(f"[fix_proper_nouns_gpt] Diff for chunk {idx}:", file=sys.stderr)
+            print(
+                f"[fix_proper_nouns_gpt] Diff for chunk {idx}, block index {index_key} "
+                f"[{ob.start} --> {ob.end}]",
+                file=sys.stderr,
+            )
             for tag, i1, i2, j1, j2 in matcher.get_opcodes():
                 if tag == "equal":
                     continue
-                # タイムスタンプ行は、出力側ですでに元に戻しているので
-                # diff ログ上でもノイズにならないようスキップする。
-                if all(is_timestamp_line(l) for l in orig_lines[i1:i2]) and all(
-                    is_timestamp_line(l) for l in fixed_lines[j1:j2]
-                ):
-                    continue
-                # 行レベルではどの行が変わったかだけを示し、
-                # 実際の強調は「After 行」を単語レベルで行う。
                 if tag in {"replace", "delete"}:
-                    # Before 側も単語レベルでハイライトしてから出す
                     for line in orig_lines[i1:i2]:
                         before_words = line.split()
                         after_line = "".join(fixed_lines[j1:j2]) if tag == "replace" else ""
@@ -262,7 +271,6 @@ def main() -> None:
                                 for w in before_words[wi1:wi2]:
                                     before_result.append(f"{BOLD}{B_BEFORE}{w}{RESET}")
                             elif wtag == "insert":
-                                # insert は After 側だけに出てくる単語なので、Before では何も出さない
                                 continue
                         highlighted_before = " ".join(before_result) if before_result else line
                         print(f"  - {highlighted_before}", file=sys.stderr)
@@ -281,14 +289,14 @@ def main() -> None:
                                 for w in after_words[wj1:wj2]:
                                     result_words.append(f"{BOLD}{HIGHLIGHT}{w}{RESET}")
                             elif wtag == "delete":
-                                # 削除された単語はログ上では何も出さない
                                 continue
                         highlighted = " ".join(result_words) if result_words else line
                         print(f"  + {highlighted}", file=sys.stderr)
 
-        fixed_blocks.append(fixed_chunk)
+            # Finally, adopt the fixed text lines for this block.
+            ob.lines = fb.lines
 
-    fixed_srt = "".join(fixed_blocks)
+    fixed_srt = blocks_to_text(all_blocks)
     output_path.write_text(fixed_srt, encoding="utf-8")
     print(f"[fix_proper_nouns_gpt] Wrote fixed SRT to {output_path}", file=sys.stderr)
 

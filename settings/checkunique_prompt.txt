@@ -60,8 +60,15 @@ But if you look closely,
 - **Be conservative**:
   - If you are not sure whether a word is a proper noun or a normal word, leave it unchanged.
   - Do not simplify grammar or fix non-name typos unless they are part of a proper noun.
+- Do NOT invent or introduce new proper nouns that were not present in the original text.
+  - Only replace a word or phrase with a proper noun if the original already clearly
+    refers to that proper noun, just with a noisy spelling.
+  - If the original sentence does not mention a character or name at all, do not add one.
+- Do NOT rewrite normal words (prepositions, pronouns, verbs, etc).
+  - Words like "in", "on", "out", "there", "somewhere", "go", "find" must remain unchanged.
+  - Only change the part that is the proper noun itself.
 - **Absolutely NEVER change timestamp lines**:
-  - Lines that contain only timestamps, such as `00:11:41,820 --> 00:11:45,500`, must remain byte-for-byte identical.
+  - Lines that contain only timestamps, s ｘｗuch as `00:11:41,820 --> 00:11:45,500`, must remain byte-for-byte identical.
     - Do not change the start time.
     - Do not change the end time.
     - Do not change the arrow `-->`.
