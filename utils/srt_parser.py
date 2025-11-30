@@ -218,3 +218,63 @@ def blocks_to_text(blocks: Iterable[SRTBlock]) -> str:
         out_lines.extend(b.lines)
 
     return "\n".join(out_lines) + ("\n" if out_lines else "")
+
+
+def _timestamp_to_seconds(ts: str) -> float:
+    """Convert an SRT timestamp ``HH:MM:SS,mmm`` to seconds (float)."""
+
+    hh, mm, rest = ts.split(":")
+    ss, ms = rest.split(",", 1)
+    return int(hh) * 3600 + int(mm) * 60 + int(ss) + int(ms) / 1000.0
+
+
+def _seconds_to_timestamp(sec: float) -> str:
+    """Convert seconds (float) back to ``HH:MM:SS,mmm`` timestamp.
+
+    Negative values are clamped to 0.
+    """
+
+    if sec < 0:
+        sec = 0.0
+    total_ms = int(round(sec * 1000))
+    total_s, ms = divmod(total_ms, 1000)
+    total_m, s = divmod(total_s, 60)
+    h, m = divmod(total_m, 60)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def fill_short_gaps(blocks: Iterable[SRTBlock], threshold: float = 0.8) -> List[SRTBlock]:
+    """Fill short gaps between consecutive blocks by extending the previous end.
+
+    For each pair of consecutive blocks (current, next), if
+
+        0 < (next.start - current.end) < ``threshold`` (in seconds),
+
+    then ``current.end`` is set to ``next.start`` so that the subtitle
+    does not disappear briefly before the next one appears.
+
+    Overlapping or zero-length gaps (<= 0) are left untouched.
+    """
+
+    seq: List[SRTBlock] = list(blocks)
+    if len(seq) < 2:
+        return seq
+
+    for i in range(len(seq) - 1):
+        cur = seq[i]
+        nxt = seq[i + 1]
+
+        try:
+            cur_end = _timestamp_to_seconds(cur.end)
+            next_start = _timestamp_to_seconds(nxt.start)
+        except Exception:
+            # If timestamps are malformed, skip this pair defensively.
+            continue
+
+        gap = next_start - cur_end
+        if 0 < gap < threshold:
+            # Extend current block to end exactly when the next one starts.
+            cur.end = nxt.start
+
+    return seq
+

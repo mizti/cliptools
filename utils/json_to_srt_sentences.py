@@ -14,6 +14,7 @@ from .azure_spacy_segmenter import (
     align_segments_to_words,
 )
 from .azure_types import Word
+from .srt_parser import SRTBlock, blocks_to_text, fill_short_gaps
 
 
 def to_seconds(pt: str) -> float:
@@ -115,14 +116,23 @@ def generate_srt_for_speaker(json_path: Path, speaker: int) -> str:
         min_chars=min_chars,
         preferred_max_chars=preferred_max_chars,
     )
-    lines: List[str] = []
+    # Convert segments into SRTBlock list
+    blocks: List[SRTBlock] = []
     for idx, seg in enumerate(segments_data, start=1):
         start, end, text = seg.start, seg.end, seg.text
-        lines.append(str(idx))
-        lines.append(f"{format_ts(start)} --> {format_ts(end)}")
-        lines.append(text)
-        lines.append("")
-    return "\n".join(lines).rstrip() + ("\n" if lines else "")
+        blocks.append(
+            SRTBlock(
+                index=idx,
+                start=format_ts(start),
+                end=format_ts(end),
+                lines=[text],
+            )
+        )
+
+    # Fill short gaps so subtitles do not disappear for <threshold gaps
+    blocks = fill_short_gaps(blocks, threshold=0.8)
+
+    return blocks_to_text(blocks)
 
 
 def main(argv: List[str]) -> int:
