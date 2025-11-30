@@ -57,7 +57,21 @@ args = parser.parse_args()
 src_path = Path(args.input)
 out_dir  = Path(args.output_dir)
 out_dir.mkdir(parents=True, exist_ok=True)
-dst_path = out_dir / f"ja-{src_path.name}"
+
+# 出力ファイル名のポリシー:
+# - 入力ファイル名に "en-US" が含まれている場合:
+#     Speaker1_en-US.srt           -> Speaker1_ja-JP.srt
+#     Speaker1_en-US_fixed.srt     -> Speaker1_ja-JP_fixed.srt
+#   のように、"en-US" を "ja-JP" に差し替える。
+# - それ以外の場合:
+#     従来通り "ja-<元ファイル名>" を先頭に付ける。
+name_str = src_path.name
+if "en-US" in name_str:
+    dst_name = name_str.replace("en-US", "ja-JP")
+else:
+    dst_name = f"ja-{name_str}"
+
+dst_path = out_dir / dst_name
 
 # ── (1) 出力ファイルを必ずゼロから作り直す ──────────────────────────────
 if dst_path.exists():

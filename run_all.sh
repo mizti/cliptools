@@ -133,12 +133,12 @@ GEN_ARGS=()
 # zsh + set -u だと、空配列の "${GEN_ARGS[@]}" 展開が unbound 扱いになることがあるため、
 # 要素数を見て分岐させてから generate_srt.sh を呼び出す。
 if [[ ${#GEN_ARGS[@]} -gt 0 ]]; then
-  ./generate_srt.sh "${GEN_ARGS[@]}" "$MEDIA_PATH" "$LOCALE"       # :contentReference[oaicite:2]{index=2}
+  ./generate_srt.sh -o "$OUTDIR" "${GEN_ARGS[@]}" "$MEDIA_PATH" "$LOCALE"       # :contentReference[oaicite:2]{index=2}
 else
-  ./generate_srt.sh "$MEDIA_PATH" "$LOCALE"       # オプションなし
+  ./generate_srt.sh -o "$OUTDIR" "$MEDIA_PATH" "$LOCALE"       # オプションなし
 fi
 
-# 生成された SRT 一覧
+# 生成された SRT 一覧（OUTDIR 配下）
 SRT_PATTERN="Speaker*_${LOCALE}.srt"
 shopt -s nullglob
 SRT_FILES=("$OUTDIR"/$SRT_PATTERN)
@@ -146,10 +146,26 @@ shopt -u nullglob
 [[ ${#SRT_FILES[@]} -gt 0 ]] || { echo "Error: SRT が見つかりません"; exit 3; }
 
 ###############################################################################
-# 3. 翻訳
+# 3. 固有名詞補正 (英語 SRT → 英語 SRT fixed)
 ###############################################################################
-echo "▶ 3/3 translate_srt.sh → ja-*.srt"
+echo "▶ 3/4 fix_unique_nouns.py (proper nouns in EN SRT)"
+FIXED_SRT_FILES=()
 for srt in "${SRT_FILES[@]}"; do
+  # 出力ファイル名は <元ファイル名>_fixed.srt
+  fixed_srt="${srt%.srt}_fixed.srt"
+  python fix_unique_nouns.py "$srt" -o "$fixed_srt" || {
+    echo "[warn] fix_unique_nouns.py failed for $srt; using original SRT" >&2
+    FIXED_SRT_FILES+=("$srt")
+    continue
+  }
+  FIXED_SRT_FILES+=("$fixed_srt")
+done
+
+###############################################################################
+# 4. 翻訳
+###############################################################################
+echo "▶ 4/4 translate_srt.sh → *_ja-JP.srt"
+for srt in "${FIXED_SRT_FILES[@]}"; do
   ./translate_srt.sh -i "$srt" -o "$OUTDIR"                     # :contentReference[oaicite:3]{index=3}
 done
 

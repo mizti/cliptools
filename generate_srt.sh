@@ -26,12 +26,14 @@ trap err_trap ERR
 
 # ---- 引数処理 -----------------------------------------------------------------
 usage(){
-  echo "Usage: $0 [-n NUM] [-m MIN] [-M MAX] <audio.(wav|mp4)> [en-US|ja-JP]" >&2
+  echo "Usage: $0 [-o OUTDIR] [-n NUM] [-m MIN] [-M MAX] <audio.(wav|mp4)> [en-US|ja-JP]" >&2
   exit 1
 }
+OUTDIR=""   # 明示指定がなければ音声ファイルと同じディレクトリに出力
 MIN_SPK=""; MAX_SPK=""; BOTH_SPK=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -o|--outdir) OUTDIR="$2"; shift 2 ;;
     -n) BOTH_SPK="$2"; shift 2 ;;
     -m) MIN_SPK="$2";  shift 2 ;;
     -M) MAX_SPK="$2";  shift 2 ;;
@@ -49,6 +51,12 @@ if [[ -n $BOTH_SPK ]]; then MIN_SPK=$BOTH_SPK; MAX_SPK=$BOTH_SPK; fi
 
 BASE=$(basename "$AUDIO" | sed -E 's/\.(wav|mp4|m4a|flac|aac)$//')
 DIR=$(dirname "$AUDIO")
+if [[ -n $OUTDIR ]]; then
+  mkdir -p "$OUTDIR"
+  OUTDIR_ABS="$OUTDIR"
+else
+  OUTDIR_ABS="$DIR"
+fi
 MONO="${DIR}/${BASE}_mono.wav"
 TMP_JSON="tmp_script.json"
 start_ts=$(date +%s)
@@ -185,7 +193,7 @@ step "Generate SRT"
 SPKS=$(jq -r '.[].speaker // empty' "$TMP_JSON" | sort -nu)
 LAST_OUT=""
 for sp in $SPKS; do
-  OUT="${DIR}/Speaker${sp}_${LOCALE}.srt"
+  OUT="${OUTDIR_ABS}/Speaker${sp}_${LOCALE}.srt"
   LAST_OUT="$OUT"
 
   # ---- 共通ロジック：recognizedPhrases → 細かい SRT ブロック ----

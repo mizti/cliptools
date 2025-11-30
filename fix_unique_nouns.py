@@ -1,0 +1,201 @@
+#!/usr/bin/env python
+import argparse
+import os
+import sys
+from pathlib import Path
+
+from openai import AzureOpenAI
+
+
+def load_env(key: str, default: str | None = None) -> str:
+    value = os.getenv(key, default)
+    if value is None:
+        raise SystemExit(f"Environment variable {key} is not set")
+    return value
+
+
+def read_dictionary(dict_path: Path) -> str:
+    if not dict_path.exists():
+        return ""
+    return dict_path.read_text(encoding="utf-8")
+
+
+def build_client() -> AzureOpenAI:
+    endpoint = load_env("ENDPOINT_URL")
+    api_key = load_env("AZURE_OPENAI_API_KEY")
+    api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
+    return AzureOpenAI(
+        azure_endpoint=endpoint,
+        api_key=api_key,
+        api_version=api_version,
+    )
+
+
+def call_model(client: AzureOpenAI, deployment: str, system_prompt: str, dictionary_text: str, srt_text: str) -> str:
+    """Call the model once for a given SRT chunk and return its content.
+
+    The SRT text should be a sequence of complete SRT blocks. The function
+    prepares the user content as:
+
+        [dictionary]
+        -----SRT-----
+        [srt_text]
+    """
+
+    user_content_parts = []
+    if dictionary_text.strip():
+        user_content_parts.append(dictionary_text.rstrip("\n"))
+    user_content_parts.append("-----SRT-----")
+    user_content_parts.append(srt_text)
+    user_content = "\n".join(user_content_parts)
+
+    resp = client.chat.completions.create(
+        model=deployment,
+        max_completion_tokens=4000,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+    )
+
+    choice = resp.choices[0]
+    content = choice.message.content or ""
+    return content
+
+
+def split_srt_into_blocks(srt_text: str) -> list[str]:
+    """Split an SRT file into a list of blocks, preserving order.
+
+    Each block is separated by one or more blank lines. The trailing
+    newline of each block is preserved so simple concatenation reproduces
+    the original structure.
+    """
+
+    lines = srt_text.splitlines(keepends=True)
+    blocks: list[list[str]] = []
+    current: list[str] = []
+
+    for line in lines:
+        if line.strip() == "":
+            # Blank line -> block boundary
+            current.append(line)
+            if current:
+                blocks.append(current)
+                current = []
+        else:
+            current.append(line)
+
+    if current:
+        blocks.append(current)
+
+    # Join inner lists to strings
+    return ["".join(block) for block in blocks]
+
+
+def chunks(seq: list[str], size: int) -> list[list[str]]:
+    """Return a list of chunks (sublists) from seq with at most `size` items each."""
+
+    return [seq[i : i + size] for i in range(0, len(seq), size)]
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Fix proper nouns in an English SRT using Azure OpenAI and a custom dictionary.")
+    parser.add_argument("input_srt", help="Path to the input English SRT file")
+    parser.add_argument("--output", "-o", help="Output SRT path (default: <input>.fixed.srt)")
+    parser.add_argument(
+        "--dict",
+        dest="dict_path",
+        default="custom_dictionary/mydictionary.txt",
+        help="Path to the tab-separated custom dictionary file",
+    )
+    parser.add_argument(
+        "--prompt",
+        dest="prompt_path",
+        default="settings/checkunique_prompt.txt",
+        help="Path to the system prompt file for proper-noun fixing",
+    )
+    parser.add_argument(
+        "--deployment",
+        dest="deployment",
+        default=os.getenv("DEPLOYMENT_NAME", "gpt-5.1-chat"),
+        help="Azure OpenAI deployment name to use",
+    )
+
+    args = parser.parse_args()
+
+    input_path = Path(args.input_srt)
+    if not input_path.exists():
+        raise SystemExit(f"Input SRT not found: {input_path}")
+
+    output_path = Path(args.output) if args.output else input_path.with_suffix(".fixed.srt")
+
+    dict_path = Path(args.dict_path)
+    prompt_path = Path(args.prompt_path)
+
+    try:
+        dictionary_text = read_dictionary(dict_path)
+    except OSError as e:
+        print(f"Warning: failed to read dictionary {dict_path}: {e}", file=sys.stderr)
+        dictionary_text = ""
+
+    if not prompt_path.exists():
+        raise SystemExit(f"Prompt file not found: {prompt_path}")
+
+    system_prompt = prompt_path.read_text(encoding="utf-8")
+    srt_text = input_path.read_text(encoding="utf-8")
+
+    # If there is no dictionary, we can choose to skip processing.
+    if not dictionary_text.strip():
+        print(f"[fix_proper_nouns_gpt] Dictionary {dict_path} is empty; copying input to output.")
+        output_path.write_text(srt_text, encoding="utf-8")
+        return
+
+    client = build_client()
+
+    # Split SRT into numbered blocks and process in chunks to avoid
+    # overloading the model with extremely long inputs.
+    all_blocks = split_srt_into_blocks(srt_text)
+    blocks_per_chunk = 100
+    print(
+        f"[fix_proper_nouns_gpt] Processing {len(all_blocks)} blocks in chunks of {blocks_per_chunk}...",
+        file=sys.stderr,
+    )
+
+    fixed_blocks: list[str] = []
+    for idx, block_group in enumerate(chunks(all_blocks, blocks_per_chunk), start=1):
+        chunk_srt = "".join(block_group)
+        print(
+            f"[fix_proper_nouns_gpt] Calling model '{args.deployment}' for chunk {idx} (blocks {len(block_group)})...",
+            file=sys.stderr,
+        )
+        try:
+            fixed_chunk = call_model(
+                client=client,
+                deployment=args.deployment,
+                system_prompt=system_prompt,
+                dictionary_text=dictionary_text,
+                srt_text=chunk_srt,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"[fix_proper_nouns_gpt] Error in chunk {idx}: {e}; keeping original chunk.",
+                file=sys.stderr,
+            )
+            fixed_chunk = chunk_srt
+
+        if not fixed_chunk.strip():
+            print(
+                f"[fix_proper_nouns_gpt] Chunk {idx} returned empty content; keeping original chunk.",
+                file=sys.stderr,
+            )
+            fixed_chunk = chunk_srt
+
+        fixed_blocks.append(fixed_chunk)
+
+    fixed_srt = "".join(fixed_blocks)
+    output_path.write_text(fixed_srt, encoding="utf-8")
+    print(f"[fix_proper_nouns_gpt] Wrote fixed SRT to {output_path}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
