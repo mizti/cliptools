@@ -109,8 +109,8 @@ for idx, block in enumerate(
             rsp = client.chat.completions.create(
                 model=deployment,
                 messages=messages,
-                temperature=0.3,
-                max_tokens=2000
+                #temperature=0.3,
+                max_completion_tokens=2000
             )
             break        # 成功
         except Exception as e:
