@@ -196,7 +196,9 @@ for sp in $SPKS; do
   OUT="${OUTDIR_ABS}/Speaker${sp}_${LOCALE}.srt"
   LAST_OUT="$OUT"
 
-  python3 utils/json_to_srt_sentences.py "$TMP_JSON" "$sp" >"$OUT"
+  # spaCy ベースの文単位セグメンテーションを行う JSON パーサをモジュール実行で呼び出す
+  # pyenv 環境を前提に、python は python3.x 系を指していることを想定
+  python -m utils.json_to_srt_sentences "$TMP_JSON" "$sp" >"$OUT"
 done
 
 # ---- 11 Cleanup & Report ----------------------------------------------------

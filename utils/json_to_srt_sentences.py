@@ -3,17 +3,17 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
-
-@dataclass
-class Word:
-    text: str
-    start: float  # seconds
-    end: float    # seconds
+from .azure_spacy_segmenter import (
+    PREFERRED_MAX_CHARS,
+    PREFERRED_MIN_CHARS,
+    align_segments_to_words,
+)
+from .azure_types import Word
 
 
 def to_seconds(pt: str) -> float:
@@ -100,98 +100,23 @@ def load_words_and_displays(path: Path, speaker: int) -> Tuple[List[Word], List[
     return words, phrases
 
 
-def split_display_into_sentences(display: str) -> List[str]:
-    """Naive sentence splitter based on . ? ! in the display text.
-
-    Keeps the punctuation at the end of each sentence.
-    """
-
-    sentences: List[str] = []
-    buf: List[str] = []
-    for ch in display:
-        buf.append(ch)
-        if ch in ".?!":
-            sent = "".join(buf).strip()
-            if sent:
-                sentences.append(sent)
-            buf = []
-    # tail without terminal punctuation
-    tail = "".join(buf).strip()
-    if tail:
-        sentences.append(tail)
-    return sentences
-
-
-def align_sentences_to_words(
-    words: List[Word], phrases: List[Tuple[str, float, float]],
-) -> List[Tuple[float, float, str]]:
-    """Approximate mapping from display-based sentences to word time ranges.
-
-    For now, we simply cut sentences by phrase, and within each phrase we
-    approximate timing by taking the min/max of the words whose center lies
-    inside the phrase interval.
-    """
-
-    if not words or not phrases:
-        return []
-
-    results: List[Tuple[float, float, str]] = []
-    w_idx = 0
-
-    for display, p_start, p_end in phrases:
-        # collect words that fall into this phrase window (using midpoint)
-        phrase_words: List[Word] = []
-        while w_idx < len(words) and words[w_idx].start < p_end + 0.001:
-            w = words[w_idx]
-            mid = (w.start + w.end) / 2.0
-            if p_start - 0.001 <= mid <= p_end + 0.001:
-                phrase_words.append(w)
-            w_idx += 1
-
-        sents = split_display_into_sentences(display)
-        if not sents:
-            continue
-
-        if not phrase_words:
-            # No word-level info; fall back to whole phrase
-            for s in sents:
-                results.append((p_start, p_end, s))
-            continue
-
-        # Naive mapping: divide the phrase word list proportionally by
-        # character length of each sentence.
-        total_chars = sum(len(s) for s in sents)
-        if total_chars == 0:
-            continue
-
-        word_pos = 0
-        n_words = len(phrase_words)
-        for i, sent in enumerate(sents):
-            if not sent:
-                continue
-            if i == len(sents) - 1:
-                # last sentence: take all remaining words
-                seg_words = phrase_words[word_pos:]
-            else:
-                share = len(sent) / total_chars
-                count = max(1, round(share * n_words))
-                seg_words = phrase_words[word_pos : word_pos + count]
-            if not seg_words:
-                continue
-            word_pos += len(seg_words)
-
-            seg_start = seg_words[0].start
-            seg_end = seg_words[-1].end
-            results.append((seg_start, seg_end, sent))
-
-    return results
-
-
 def generate_srt_for_speaker(json_path: Path, speaker: int) -> str:
     words, phrases = load_words_and_displays(json_path, speaker)
-    segments = align_sentences_to_words(words, phrases)
+    # Strategy: spaCy-based segmentation by default. If the user explicitly
+    # disables it via environment variable, we could in the future fall back
+    # to a naive splitter, but for now spaCy is the only implementation.
+    min_chars = PREFERRED_MIN_CHARS
+    preferred_max_chars = PREFERRED_MAX_CHARS
+
+    segments_data = align_segments_to_words(
+        words,
+        phrases,
+        min_chars=min_chars,
+        preferred_max_chars=preferred_max_chars,
+    )
     lines: List[str] = []
-    for idx, (start, end, text) in enumerate(segments, start=1):
+    for idx, seg in enumerate(segments_data, start=1):
+        start, end, text = seg.start, seg.end, seg.text
         lines.append(str(idx))
         lines.append(f"{format_ts(start)} --> {format_ts(end)}")
         lines.append(text)
