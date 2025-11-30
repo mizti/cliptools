@@ -102,9 +102,10 @@ def load_words_and_displays(path: Path, speaker: int) -> Tuple[List[Word], List[
 
 def generate_srt_for_speaker(json_path: Path, speaker: int) -> str:
     words, phrases = load_words_and_displays(json_path, speaker)
-    # Strategy: spaCy-based segmentation by default. If the user explicitly
-    # disables it via environment variable, we could in the future fall back
-    # to a naive splitter, but for now spaCy is the only implementation.
+    # Strategy: spaCy-based segmentation (see azure_spacy_segmenter).
+    # For now we always use spaCy.
+    # 別のルールベース分割に切り替えたくなったら、この関数内でパラメータを変えるか、
+    # 別実装を呼び出す形で拡張する。
     min_chars = PREFERRED_MIN_CHARS
     preferred_max_chars = PREFERRED_MAX_CHARS
 

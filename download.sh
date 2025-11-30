@@ -86,24 +86,22 @@ yt-dlp -U && \
 
 # Function to get safe basename
 get_safe_basename() {
-  # $1 = 出力ディレクトリ (= OUTDIR)
+  # $1 = output directory (= OUTDIR)
   local outdir="$1"
-  local raw="downloaded_clip"                   # -o 省略時の既定名
+  local raw="downloaded_clip"  # default basename when -o is omitted
 
   if [[ -n "$outdir" && "$outdir" != "." ]]; then
-    raw=$(basename "$outdir")                   # -o があれば末尾名
+    raw=$(basename "$outdir")  # use the last path component as basename
   fi
-  echo "${raw//[^a-zA-Z0-9._-]/_}"              # 安全化して返す
+  echo "${raw//[^a-zA-Z0-9._-]/_}"  # sanitize to a safe filename
 }
 
 # Main logic
 if [[ -n "$START_TIME" && -n "$END_TIME" ]]; then
   echo "Processing clip from $START_TIME to $END_TIME"
 
-  BASENAME="${USER_BASENAME:-$(get_safe_basename "$URL" "${AUDIO_ONLY:+_clip}")}"
+  BASENAME="${USER_BASENAME:-$(get_safe_basename "$URL")}"
   TEMP_TEMPLATE="${OUTPUT_DIR%/}/__ytclip_temp.%(ext)s"
-  FINAL_EXT="${AUDIO_ONLY:+mp3}${AUDIO_ONLY:+}"  # will be mp3 or skip
-  FINAL_EXT="${AUDIO_ONLY:+mp3}${AUDIO_ONLY:+}" 
   if [[ "$AUDIO_ONLY" == true ]]; then
     download_audio "$URL" "$TEMP_TEMPLATE"
     TEMP_FILE=$(ls "${TEMP_TEMPLATE//%(ext)s/mp3}")
