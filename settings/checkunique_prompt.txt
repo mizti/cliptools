@@ -60,6 +60,14 @@ But if you look closely,
 - **Be conservative**:
   - If you are not sure whether a word is a proper noun or a normal word, leave it unchanged.
   - Do not simplify grammar or fix non-name typos unless they are part of a proper noun.
+- **Absolutely NEVER change timestamp lines**:
+  - Lines that contain only timestamps, such as `00:11:41,820 --> 00:11:45,500`, must remain byte-for-byte identical.
+    - Do not change the start time.
+    - Do not change the end time.
+    - Do not change the arrow `-->`.
+    - Do not change commas, dots, or zero padding.
+  - Even if you think the timestamps look wrong, you must NOT fix or adjust them. Leave them exactly as-is.
+  - Do not delete, reorder, or insert any timestamp lines.
 
 ## Output format
 Return **only** the corrected SRT text, with exactly the same structure as the input SRT:
