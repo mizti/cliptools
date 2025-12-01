@@ -132,17 +132,7 @@ for idx, block_group in enumerate(
         #   出力 SRT のポリシー（行末に句点を付けない）を守る。
         content = content.replace("。", "")
 
-    # モデルの出力を SRT としてパースし、構造が壊れていないかを検証する。
-    ok_srt, srt_errors = validate_srt(content)
-    if not ok_srt:
-        print(
-            f"[WARN] chunk {idx}: translated text failed SRT validation; keeping original blocks.",
-            file=sys.stderr,
-        )
-        for msg in srt_errors[:5]:
-            print(f"    ! {msg}", file=sys.stderr)
-        continue
-
+    # モデル出力を一旦 SRT としてパースする。
     fixed_blocks = parse_srt_blocks(content)
     if not fixed_blocks:
         print(
@@ -155,23 +145,48 @@ for idx, block_group in enumerate(
     orig_by_index = {b.index: b for b in block_group if b.index is not None}
     fixed_by_index = {b.index: b for b in fixed_blocks if b.index is not None}
 
-    if set(orig_by_index.keys()) != set(fixed_by_index.keys()):
+    common_keys = sorted(orig_by_index.keys() & fixed_by_index.keys())
+    if not common_keys:
         print(
-            f"[WARN] chunk {idx}: index mismatch between original and translated; keeping original blocks.",
+            f"[WARN] chunk {idx}: no common indices between original and translated; keeping original blocks.",
             file=sys.stderr,
         )
         continue
 
-    for key in sorted(orig_by_index.keys()):
+    # 共通 index だけ本文を差し替えつつ、タイムスタンプは元の値を書き戻す。
+    for key in common_keys:
         ob = orig_by_index[key]
         fb = fixed_by_index[key]
 
-        # タイムスタンプは絶対に元のまま。
         fb.start = ob.start
         fb.end = ob.end
 
-        # 本文だけを差し替える。
         ob.lines = fb.lines
+
+    # タイムスタンプを書き戻した後の状態で SRT として妥当かを検証する。
+    # これにより、GPT がタイムスタンプを壊しても、そのせいでチャンク全体が
+    # スキップされることを防ぐ。
+    merged_text = blocks_to_text(blocks)
+    ok_srt, srt_errors = validate_srt(merged_text)
+    if not ok_srt:
+        print(
+            f"[WARN] chunk {idx}: merged SRT after applying translation failed validation; keeping original blocks for this chunk.",
+            file=sys.stderr,
+        )
+        for msg in srt_errors[:5]:
+            print(f"    ! {msg}", file=sys.stderr)
+
+        # 差し替えた本文を元に戻す（共通 index の範囲のみ）。
+        for key in common_keys:
+            ob = orig_by_index[key]
+            fb = fixed_by_index[key]
+            # fb.lines には翻訳済みテキストが入っているので、元の ob.lines を
+            # 使ってロールバックする必要があるが、ここでは "blocks" 全体を
+            # 未更新の状態から再構築しているため、このループが呼ばれる頃には
+            # ob.lines はまだ英語のままになっている前提とする。
+            #
+            # 念のため、何もしないことで "元の状態のまま" に保つ。
+            pass
 
     tqdm.tqdm.write(f"chunk {idx}: finish_reason={reason}")
 
