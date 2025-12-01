@@ -26,6 +26,9 @@ YouTube 配信などの長尺動画やローカルの動画ファイルから日
 ```bash
 # URL を渡して、ダウンロード → 字幕生成 → 固有名詞補正 → 日本語字幕
 ./run_all.sh -u "https://youtu.be/xxxxx" -o clips/workdir -l en-US -n 1
+
+# 既に取得済みの Azure STT JSON から SRT 生成以降だけを再実行
+./run_all.sh -j clips/workdir/azure-stt.json -o clips/workdir -l en-US
 ```
 
 ---
@@ -168,6 +171,9 @@ source .env
 
 # 既存のローカルファイルを入力にして処理
 ./run_all.sh -f clips/workdir/input.mp4 -o clips/workdir
+
+# 既に取得済みの Azure STT JSON からダウンロードをスキップして処理
+./run_all.sh -j clips/workdir/azure-stt.json -o clips/workdir -l en-US
 ```
 
 主なオプション:
@@ -179,6 +185,7 @@ source .env
 - `--clip S E`   : `hh:mm:ss` 形式で開始／終了時刻を指定して切り抜き(Option)
 - `--audio`      : 音声のみをダウンロードして処理(Option)
 - `-n` / `-m` / `-N` : 話者数の固定／最小／最大 (Option / デフォルト1)
+- `-j, --from-json` : 既にマージ済みの Azure STT JSON から開始（download.sh をスキップし、generate_srt.sh の `--from-json` モードを使用）
 
 ---
 
@@ -197,16 +204,16 @@ source .env
 
 ```bash
 # フル動画をカレントディレクトリにダウンロード
-./download.sh "https://youtu.be/xxxxx"
+./download.sh -u "https://youtu.be/xxxxx"
 
 # 出力先ディレクトリとファイル名を指定
-./download.sh "https://youtu.be/xxxxx" clips/myclip myclip
+./download.sh -u "https://youtu.be/xxxxx" -o clips/myclip -b myclip
 
 # 10秒〜1分までをクリップとして切り出し
-./download.sh -s 00:00:10 -e 00:01:00 "https://youtu.be/xxxxx" clips/myclip myclip
+./download.sh -u "https://youtu.be/xxxxx" -o clips/myclip -b myclip -s 00:00:10 -e 00:01:00
 
 # 音声のみを MP3 でダウンロード
-./download.sh -w "https://youtu.be/xxxxx" clips/audio_only myaudio
+./download.sh -u "https://youtu.be/xxxxx" -o clips/audio_only -b myaudio -w
 ```
 
 ---

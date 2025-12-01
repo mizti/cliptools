@@ -1,49 +1,41 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: ./download.sh <YouTube URL> [-s start_time] [-e end_time] [-w] [output_dir] [filename_without_ext]
+# Usage:
+#   ./download.sh -u <YouTube URL> [-o output_dir] [-b basename] [-s start_time] [-e end_time] [-w]
 
-# Parse arguments
+URL=""
+OUTPUT_DIR="."
+USER_BASENAME=""
 START_TIME=""
 END_TIME=""
 AUDIO_ONLY=false
-POSITIONAL=()
 
 while [[ $# -gt 0 ]]; do
-  case $1 in
+  case "$1" in
+    -u|--url)
+      URL="$2"; shift 2 ;;
+    -o|--outdir)
+      OUTPUT_DIR="$2"; shift 2 ;;
+    -b|--basename)
+      USER_BASENAME="$2"; shift 2 ;;
     -s|--start)
-      START_TIME="$2"
-      shift 2
-      ;;
+      START_TIME="$2"; shift 2 ;;
     -e|--end)
-      END_TIME="$2"
-      shift 2
-      ;;
+      END_TIME="$2"; shift 2 ;;
     -w|--audio-only)
-      AUDIO_ONLY=true
-      shift
-      ;;
-    -*|--*)
-      echo "Unknown option $1"
-      exit 1
-      ;;
+      AUDIO_ONLY=true; shift ;;
+    -h|--help)
+      echo "Usage: $0 -u <YouTube URL> [-o output_dir] [-b basename] [-s start_time] [-e end_time] [-w]"; exit 0 ;;
     *)
-      POSITIONAL+=("$1")
-      shift
-      ;;
+      echo "Unknown option $1" >&2; exit 1 ;;
   esac
 done
 
-set -- "${POSITIONAL[@]}"
-
-if [ $# -lt 1 ] || [ $# -gt 3 ]; then
-  echo "Usage: $0 <YouTube URL> [-s start_time] [-e end_time] [-w] [output_dir] [filename_without_ext]"
+if [[ -z $URL ]]; then
+  echo "Usage: $0 -u <YouTube URL> [-o output_dir] [-b basename] [-s start_time] [-e end_time] [-w]" >&2
   exit 1
 fi
-
-URL="$1"
-OUTPUT_DIR="${2:-.}"
-USER_BASENAME="${3:-}"
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -100,7 +92,7 @@ get_safe_basename() {
 if [[ -n "$START_TIME" && -n "$END_TIME" ]]; then
   echo "Processing clip from $START_TIME to $END_TIME"
 
-  BASENAME="${USER_BASENAME:-$(get_safe_basename "$URL")}"
+  BASENAME="${USER_BASENAME:-$(get_safe_basename "$OUTPUT_DIR")}"
   TEMP_TEMPLATE="${OUTPUT_DIR%/}/__ytclip_temp.%(ext)s"
   if [[ "$AUDIO_ONLY" == true ]]; then
     download_audio "$URL" "$TEMP_TEMPLATE"
@@ -134,7 +126,7 @@ if [[ -n "$START_TIME" && -n "$END_TIME" ]]; then
 
 else
   # No clipping; full download
-  BASENAME="${USER_BASENAME:-$(get_safe_basename "$URL" "")}"
+  BASENAME="${USER_BASENAME:-$(get_safe_basename "$OUTPUT_DIR" "")}"
   if [[ "$AUDIO_ONLY" == true ]]; then
     download_audio "$URL" "${OUTPUT_DIR%/}/${BASENAME}.%(ext)s"
     echo "Audio downloaded to: ${OUTPUT_DIR%/}/${BASENAME}.mp3"

@@ -37,6 +37,7 @@ set -Eeuo pipefail
 URL=""               # YouTube URL
 MEDIA_FILE=""        # 既存ファイル
 OUTDIR="."
+FROM_JSON=""         # 既存の Azure STT JSON から開始
 LOCALE="en-US"
 START="" END=""
 AUDIO_ONLY=false
@@ -53,29 +54,42 @@ show_help() {
 # ────────────── 引数パース
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -u|--url)   URL="$2";       shift 2 ;;
-    -f|--file)  MEDIA_FILE="$2";shift 2 ;;
+  -u|--url)   URL="$2";       shift 2 ;;
+  -f|--file)  MEDIA_FILE="$2";shift 2 ;;
     -o|--outdir)OUTDIR="$2";    shift 2 ;;
     -l|--locale)LOCALE="$2";    shift 2 ;;
     --clip)     START="$2"; END="$3"; shift 3 ;;
     --audio)    AUDIO_ONLY=true;shift ;;
     -n|--spk)   FIX_SPK="$2";   shift 2 ;;
     -m|--min)   MIN_SPK="$2";   shift 2 ;;
-    -N|--max|-M)MAX_SPK="$2";   shift 2 ;;
+  -N|--max|-M)MAX_SPK="$2";   shift 2 ;;
+  -j|--from-json)FROM_JSON="$2"; shift 2 ;;
     -h|--help)  show_help; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
 
 # ────────────── 相互排他チェック
+if [[ -n $FROM_JSON && -n $URL ]]; then
+  echo "Error: --from-json と -u は同時に指定できません" >&2; exit 1
+fi
+if [[ -n $FROM_JSON && -n $MEDIA_FILE ]]; then
+  echo "Error: --from-json と -f は同時に指定できません" >&2; exit 1
+fi
 if [[ -n $URL && -n $MEDIA_FILE ]]; then
   echo "Error: -u と -f は同時に指定できません" >&2; exit 1
 fi
-if [[ -z $URL && -z $MEDIA_FILE ]]; then
-  echo "Error: -u か -f のどちらかを指定してください" >&2; exit 1
+if [[ -z $URL && -z $MEDIA_FILE && -z $FROM_JSON ]]; then
+  echo "Error: -u か -f か --from-json のいずれかを指定してください" >&2; exit 1
 fi
 if [[ -n $FIX_SPK && ( -n $MIN_SPK || -n $MAX_SPK ) ]]; then
   echo "Error: -n は -m/-N と同時に使えません" >&2; exit 1
+fi
+
+# -f が指定されていて -o が指定されていない場合は、入力ファイルと同じディレクトリを
+# デフォルトの出力ディレクトリとして扱う。
+if [[ -n $MEDIA_FILE && "$OUTDIR" == "." ]]; then
+  OUTDIR=$(dirname "$MEDIA_FILE")
 fi
 
 mkdir -p "$OUTDIR"
@@ -84,19 +98,23 @@ mkdir -p "$OUTDIR"
 # 1. ダウンロード（-u の場合）
 ###############################################################################
 MEDIA_PATH=""
-if [[ -n $URL ]]; then
-  # download.sh の “安全なタイトル → ファイル名” ロジックを踏襲:contentReference[oaicite:0]{index=0}
+if [[ -n $FROM_JSON ]]; then
+  # 既存の Azure STT JSON から開始する場合は download.sh をスキップし、
+  # generate_srt.sh の --from-json 経路だけを使う。
+  echo "▶ 1/3 既存 Azure STT JSON 使用: $FROM_JSON"
+elif [[ -n $URL ]]; then
+  # download.sh と同じロジックで安全なベース名を決める
   get_safe_basename() {
     # $1 = 出力ディレクトリ (= OUTDIR)
     local outdir="$1"
     local raw="downloaded_clip"                   # -o 省略時の既定名
-  
+
     if [[ -n "$outdir" && "$outdir" != "." ]]; then
       raw=$(basename "$outdir")                   # -o があれば末尾名
     fi
     echo "${raw//[^a-zA-Z0-9._-]/_}"              # 安全化して返す
   }
-  BASENAME=$(get_safe_basename "$URL")
+  BASENAME=$(get_safe_basename "$OUTDIR")
 
   DL_ARGS=()
   [[ -n $START && -n $END ]] && DL_ARGS+=(-s "$START" -e "$END")
@@ -106,9 +124,9 @@ if [[ -n $URL ]]; then
   # zsh + set -u だと、空配列の "${DL_ARGS[@]}" 展開が unbound 扱いになることがあるため、
   # 要素数を見て分岐させてから download.sh を呼び出す。
   if [[ ${#DL_ARGS[@]} -gt 0 ]]; then
-    ./download.sh "$URL" "${DL_ARGS[@]}" "$OUTDIR" "$BASENAME"  # :contentReference[oaicite:1]{index=1}
+    ./download.sh -u "$URL" -o "$OUTDIR" -b "$BASENAME" "${DL_ARGS[@]}"
   else
-    ./download.sh "$URL" "$OUTDIR" "$BASENAME"  # オプションなし
+    ./download.sh -u "$URL" -o "$OUTDIR" -b "$BASENAME"
   fi
 
   EXT=$($AUDIO_ONLY && echo "mp3" || echo "mp4")
@@ -119,7 +137,9 @@ else
   echo "▶ 1/3 既存メディア使用: $MEDIA_PATH"
 fi
 
-[[ -f $MEDIA_PATH ]] || { echo "Error: ファイルがありません: $MEDIA_PATH"; exit 2; }
+if [[ -z $FROM_JSON ]]; then
+  [[ -f $MEDIA_PATH ]] || { echo "Error: ファイルがありません: $MEDIA_PATH"; exit 2; }
+fi
 
 ###############################################################################
 # 2. 字幕生成
@@ -132,7 +152,14 @@ GEN_ARGS=()
 
 # zsh + set -u だと、空配列の "${GEN_ARGS[@]}" 展開が unbound 扱いになることがあるため、
 # 要素数を見て分岐させてから generate_srt.sh を呼び出す。
-if [[ ${#GEN_ARGS[@]} -gt 0 ]]; then
+if [[ -n $FROM_JSON ]]; then
+  # 既存 JSON から開始する場合
+  if [[ ${#GEN_ARGS[@]} -gt 0 ]]; then
+    ./generate_srt.sh --from-json "$FROM_JSON" -o "$OUTDIR" "${GEN_ARGS[@]}" "$LOCALE"
+  else
+    ./generate_srt.sh --from-json "$FROM_JSON" -o "$OUTDIR" "$LOCALE"
+  fi
+elif [[ ${#GEN_ARGS[@]} -gt 0 ]]; then
   ./generate_srt.sh -o "$OUTDIR" "${GEN_ARGS[@]}" "$MEDIA_PATH" "$LOCALE"       # :contentReference[oaicite:2]{index=2}
 else
   ./generate_srt.sh -o "$OUTDIR" "$MEDIA_PATH" "$LOCALE"       # オプションなし
