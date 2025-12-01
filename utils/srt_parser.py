@@ -278,3 +278,87 @@ def fill_short_gaps(blocks: Iterable[SRTBlock], threshold: float = 0.8) -> List[
 
     return seq
 
+
+def _target_duration_for_text(text: str, base_min: float) -> float:
+    """Compute a target display duration based on text length.
+
+    This keeps "light" interjections short while giving longer sentences
+    a bit more time on screen without overdoing it.
+    """
+
+    stripped = text.replace("\n", " ").strip()
+    if not stripped:
+        return base_min
+
+    length = len(stripped)
+
+    # Very short (OK, Yeah, Hello...)
+    if length <= 10:
+        return base_min
+    # Short sentence fragments.
+    if length <= 25:
+        return max(base_min, 1.3)
+    # Medium-length lines.
+    if length <= 40:
+        return max(base_min, 1.7)
+    # Longer lines cap out at ~2.0s to avoid huge stretches.
+    return max(base_min, 2.0)
+
+
+def enforce_min_duration(blocks: Iterable[SRTBlock], min_seconds: float = 1.0) -> List[SRTBlock]:
+    """Ensure each block is shown long enough to be readable.
+
+    For each block, we compute a "target" duration based on the text length
+    (with ``min_seconds`` as a hard lower bound) and then try to extend the
+    block's end time up to that target without overlapping the next block.
+
+    The last block is left unchanged because we don't know the true media
+    end time and over-extending could cause odd artifacts in some players.
+    """
+
+    seq: List[SRTBlock] = list(blocks)
+    if not seq:
+        return seq
+
+    for i in range(len(seq)):
+        cur = seq[i]
+
+        try:
+            start_sec = _timestamp_to_seconds(cur.start)
+            end_sec = _timestamp_to_seconds(cur.end)
+        except Exception:
+            # If timestamps are malformed, skip this block defensively.
+            continue
+
+        duration = end_sec - start_sec
+        if duration <= 0:
+            # Clearly malformed; leave as-is.
+            continue
+
+        # Compute a target duration based on text length, but never
+        # shorter than min_seconds.
+        target = _target_duration_for_text(cur.text, base_min=min_seconds)
+
+        if duration >= target:
+            # Already long enough for its content.
+            continue
+
+        desired_end = start_sec + target
+
+        # If there's a next block, we must not run past its start.
+        if i < len(seq) - 1:
+            try:
+                next_start = _timestamp_to_seconds(seq[i + 1].start)
+            except Exception:
+                next_start = desired_end
+            new_end_sec = min(desired_end, next_start)
+        else:
+            # Last block: keep as-is to avoid over-extending beyond media.
+            new_end_sec = end_sec
+
+        # Do not shorten blocks accidentally.
+        if new_end_sec > end_sec:
+            cur.end = _seconds_to_timestamp(new_end_sec)
+
+    return seq
+

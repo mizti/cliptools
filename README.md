@@ -221,26 +221,29 @@ spaCy ベースの文分割で「読みやすい長さ」の SRT を生成しま
 1. FFmpeg でモノラル WAV に変換
 2. Azure Storage に音声をアップロード
 3. Azure Speech (Speech to Text v3.2) でバッチ文字起こしジョブを作成
-4. 結果 JSON (`tmp_script.json`) をダウンロード・マージ
+4. 結果 JSON をダウンロード・マージし、出力ディレクトリに `azure-stt.json` として保存
 5. `python -m utils.json_to_srt_sentences` で適度な長さの文単位の SRT を生成 (文を適切な長さで分割するためにSpaCyを利用)
 
 使い方:
 
 ```bash
 ./generate_srt.sh [-o OUTDIR] [-n NUM] [-m MIN] [-M MAX] <audio.(wav|mp4)> [en-US|ja-JP]
+./generate_srt.sh --from-json <azure-stt.json> [-o OUTDIR] [en-US|ja-JP]
 ```
 
 主なオプション:
 
-- `-o OUTDIR` : 出力先ディレクトリ（省略時は入力ファイルと同じディレクトリ）
-- `-n NUM`    : 話者数を固定（例: `-n 1` で 1 人）
-- `-m MIN`    : 話者数の最小値
-- `-M MAX`    : 話者数の最大値
-- `LOCALE`    : `en-US` または `ja-JP`（省略時は `en-US`）
+- `-o OUTDIR`      : 出力先ディレクトリ（省略時は入力ファイル／JSON と同じディレクトリ）
+- `-n NUM`         : 話者数を固定（例: `-n 1` で 1 人）
+- `-m MIN`         : 話者数の最小値
+- `-M MAX`         : 話者数の最大値
+- `--from-json`    : 既に取得済みの Azure STT マージ済み JSON（通常は `azure-stt.json`）から SRT のみ再生成するモード
+- `LOCALE`         : `en-US` または `ja-JP`（省略時は `en-US`）
 
 出力:
 
 - `OUTDIR` 配下に `Speaker1_en-US.srt` のような形で話者ごとの SRT が生成されます。
+- 通常モードでは、同じディレクトリに `azure-stt.json` も保存され、後から `--from-json` で再利用できます。
 
 ---
 
