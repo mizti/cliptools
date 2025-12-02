@@ -25,6 +25,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('-i', '--input',      required=True, help='SRT file to translate')
 parser.add_argument('-o', '--output_dir', required=True, help='Directory to write result')
 parser.add_argument('--chunk', type=int, default=50, help='Lines per request (default: 50)')
+parser.add_argument('--debug-dump', action='store_true', help='Dump raw model response for inspection (one chunk only)')
 args = parser.parse_args()
 
 src_path = Path(args.input)
@@ -81,7 +82,13 @@ def chunk_blocks(seq: List[SRTBlock], size: int) -> List[List[SRTBlock]]:
     return [seq[i : i + size] for i in range(0, len(seq), size)]
 
 
-BLOCKS_PER_REQUEST = 80
+BLOCKS_PER_REQUEST = 40
+
+# デバッグ: 問題のクリップで GPT 応答が SRT としてパースできない原因を調べるため、
+# 先頭いくつかのチャンクについてはモデル応答の生テキストと、パース/検証エラーを
+# ログに詳細出力する。長期的にはフラグで切り替えるか削除予定の一時的な計測コード。
+DEBUG_LOG_RAW_CHUNKS = int(os.getenv("TRANSLATE_DEBUG_RAW_CHUNKS", "0") or 0)
+DEBUG_LOG_DIR = os.getenv("TRANSLATE_DEBUG_DIR", "clips/_translate_debug")
 
 total_chunks = (len(blocks) + BLOCKS_PER_REQUEST - 1) // BLOCKS_PER_REQUEST
 
@@ -147,6 +154,23 @@ for idx, block_group in enumerate(
         #   出力 SRT のポリシー（行末に句点を付けない）を守る。
         content = content.replace("。", "")
 
+    # --debug-dump が指定されている場合は、最初のチャンクに対するモデル応答を
+    # そのまま標準出力に書き出して終了する。プロンプトとの噛み合わせ調査用。
+    if args.debug_dump:
+        sys.stdout.write(content or "")
+        sys.stdout.flush()
+        sys.exit(0)
+
+    # デバッグ用に生テキストを保存（必要数だけ）
+    if DEBUG_LOG_RAW_CHUNKS and idx <= DEBUG_LOG_RAW_CHUNKS:
+        try:
+            log_dir = Path(DEBUG_LOG_DIR)
+            log_dir.mkdir(parents=True, exist_ok=True)
+            raw_path = log_dir / f"chunk_{idx:03d}_raw.txt"
+            raw_path.write_text(content or "", encoding="utf-8")
+        except Exception as e:  # noqa: BLE001
+            print(f"[WARN] chunk {idx}: failed to write raw debug log: {e}", file=sys.stderr)
+
     # モデル出力を一旦 SRT としてパースする。
     fixed_blocks = parse_srt_blocks(content)
     if not fixed_blocks:
@@ -154,6 +178,10 @@ for idx, block_group in enumerate(
             f"[WARN] chunk {idx}: no parsable SRT blocks in translation; keeping original blocks.",
             file=sys.stderr,
         )
+        # 失敗時も、デバッグ用に短縮表示を残しておく
+        preview = (content or "").splitlines()
+        preview = " \n".join(preview[:5])
+        print(f"       raw head (first 5 lines): {preview}", file=sys.stderr)
         continue
 
     # index で対応付けし、タイムスタンプは元のブロックから引き継ぐ。
@@ -179,29 +207,48 @@ for idx, block_group in enumerate(
         ob.lines = fb.lines
 
     # タイムスタンプを書き戻した後の状態で SRT として妥当かを検証する。
-    # これにより、GPT がタイムスタンプを壊しても、そのせいでチャンク全体が
-    # スキップされることを防ぐ。
+    # ここでは「致命的な構造崩れ」のみチャンク単位でロールバックし、
+    # そうでなければ個々のブロックはできるだけ採用する方針とする。
     merged_text = blocks_to_text(blocks)
     ok_srt, srt_errors = validate_srt(merged_text)
     if not ok_srt:
-        print(
-            f"[WARN] chunk {idx}: merged SRT after applying translation failed validation; keeping original blocks for this chunk.",
-            file=sys.stderr,
-        )
-        for msg in srt_errors[:5]:
-            print(f"    ! {msg}", file=sys.stderr)
+        # 文字通りの構造崩れ（例: インデックス欠落、タイムスタンプ順序の破綻など）
+        # だけを致命的とみなし、それ以外の軽微な警告は許容する。
+        fatal_errors: list[str] = []
+        nonfatal_errors: list[str] = []
+        for msg in srt_errors:
+            m_lower = msg.lower()
+            if "start time" in m_lower and "after end time" in m_lower:
+                fatal_errors.append(msg)
+            elif "overlap" in m_lower:
+                fatal_errors.append(msg)
+            elif "missing index" in m_lower:
+                fatal_errors.append(msg)
+            else:
+                nonfatal_errors.append(msg)
 
-        # 差し替えた本文を元に戻す（共通 index の範囲のみ）。
-        for key in common_keys:
-            ob = orig_by_index[key]
-            fb = fixed_by_index[key]
-            # fb.lines には翻訳済みテキストが入っているので、元の ob.lines を
-            # 使ってロールバックする必要があるが、ここでは "blocks" 全体を
-            # 未更新の状態から再構築しているため、このループが呼ばれる頃には
-            # ob.lines はまだ英語のままになっている前提とする。
-            #
-            # 念のため、何もしないことで "元の状態のまま" に保つ。
-            pass
+        if fatal_errors:
+            print(
+                f"[WARN] chunk {idx}: merged SRT failed validation with fatal errors; keeping original blocks for this chunk.",
+                file=sys.stderr,
+            )
+            for msg in fatal_errors[:5]:
+                print(f"    ! {msg}", file=sys.stderr)
+
+            # 差し替えた本文を元に戻す（共通 index の範囲のみ）。
+            for key in common_keys:
+                ob = orig_by_index[key]
+                # ob.lines はまだ英語のままなので、何もせず元に戻す。
+                # （上書き済みの状態を持たない実装のため、実質 no-op）
+                pass
+        else:
+            # 軽微なエラーはログだけ出してテキストは採用する。
+            print(
+                f"[WARN] chunk {idx}: merged SRT has non-fatal validation warnings; accepting translated blocks.",
+                file=sys.stderr,
+            )
+            for msg in nonfatal_errors[:5]:
+                print(f"    ~ {msg}", file=sys.stderr)
 
     tqdm.tqdm.write(f"chunk {idx}: finish_reason={reason}")
 

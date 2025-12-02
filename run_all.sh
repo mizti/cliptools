@@ -92,8 +92,6 @@ if [[ -n $MEDIA_FILE && "$OUTDIR" == "." ]]; then
   OUTDIR=$(dirname "$MEDIA_FILE")
 fi
 
-mkdir -p "$OUTDIR"
-
 ###############################################################################
 # 1. ダウンロード（-u の場合）
 ###############################################################################
@@ -141,6 +139,14 @@ else
   MEDIA_PATH="$MEDIA_FILE"
   echo "▶ 1/3 既存メディア使用: $MEDIA_PATH"
 fi
+
+# --from-json で -o が省略された場合も、JSON ファイルと同じディレクトリを
+# デフォルトの出力ディレクトリとして扱う。
+if [[ -n $FROM_JSON && "$OUTDIR" == "." ]]; then
+  OUTDIR=$(dirname "$FROM_JSON")
+fi
+
+mkdir -p "$OUTDIR"
 
 if [[ -z $FROM_JSON ]]; then
   [[ -f $MEDIA_PATH ]] || { echo "Error: ファイルがありません: $MEDIA_PATH"; exit 2; }
