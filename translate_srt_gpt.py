@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import List
 
 from openai import AzureOpenAI      # pip install openai>=1.0
+from openai import APIConnectionError, APITimeoutError, APIError
 import tqdm                         # pip install tqdm
 
 from utils.srt_parser import SRTBlock, blocks_to_text, parse_srt_blocks, validate_srt
@@ -80,7 +81,7 @@ def chunk_blocks(seq: List[SRTBlock], size: int) -> List[List[SRTBlock]]:
     return [seq[i : i + size] for i in range(0, len(seq), size)]
 
 
-BLOCKS_PER_REQUEST = 20
+BLOCKS_PER_REQUEST = 80
 
 total_chunks = (len(blocks) + BLOCKS_PER_REQUEST - 1) // BLOCKS_PER_REQUEST
 
@@ -97,21 +98,35 @@ for idx, block_group in enumerate(
         {"role": "user",   "content": block_text}
     ]
 
-    # ― リクエスト＋指数バックオフリトライ ―
+    # ― リクエスト＋タイムアウト付き指数バックオフリトライ ―
     rsp, last_err = None, None
-    for attempt in range(3):
+    max_retries = 3
+    timeout_seconds = 60.0
+    for attempt in range(1, max_retries + 1):
         try:
             rsp = client.chat.completions.create(
                 model=deployment,
                 messages=messages,
                 #temperature=0.3,
-                max_completion_tokens=2000
+                max_completion_tokens=2000,
+                timeout=timeout_seconds,
             )
             break        # 成功
-        except Exception as e:
+        except (APITimeoutError, APIConnectionError, APIError) as e:
             last_err = e
-            wait = 2 ** attempt
-            print(f"[WARN] block {idx}: request failed (attempt {attempt+1}): {e}", file=sys.stderr)
+            wait = 2 ** (attempt - 1)
+            print(
+                f"[WARN] chunk {idx}: API error on attempt {attempt}/{max_retries}: {e}",
+                file=sys.stderr,
+            )
+            time.sleep(wait)
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            wait = 2 ** (attempt - 1)
+            print(
+                f"[WARN] chunk {idx}: unexpected error on attempt {attempt}/{max_retries}: {e}",
+                file=sys.stderr,
+            )
             time.sleep(wait)
 
     if rsp is None:      # 3 回とも失敗

@@ -177,13 +177,25 @@ JSON
   # ---- 6 Polling --------------------------------------------------------------
   step "Polling job status"
   echo -n "Processing" >&2
+  # 軽量リトライ: az rest が一時的に失敗しても数回までは許容する
+  FAIL_COUNT=0
+  MAX_FAIL=3
   while :; do
-    STATUS=$(az rest --skip-authorization-header --method get --uri "$STATUS_URL" \
+    if STATUS=$(az rest --skip-authorization-header --method get --uri "$STATUS_URL" \
               --headers "Ocp-Apim-Subscription-Key=$SPEECH_KEY" \
-              --query status -o tsv)
-    echo -n "." >&2
-    [[ $STATUS == Succeeded ]] && { echo " ok" >&2; break; }
-    [[ $STATUS == Failed    ]] && { echo " failed" >&2; exit 3; }
+              --query status -o tsv 2>/dev/null); then
+      echo -n "." >&2
+      [[ $STATUS == Succeeded ]] && { echo " ok" >&2; break; }
+      [[ $STATUS == Failed    ]] && { echo " failed" >&2; exit 3; }
+      FAIL_COUNT=0   # 通ったらカウンタリセット
+    else
+      FAIL_COUNT=$((FAIL_COUNT+1))
+      echo -n "x" >&2
+      if (( FAIL_COUNT >= MAX_FAIL )); then
+        echo " polling API failed ${FAIL_COUNT} times" >&2
+        exit 2
+      fi
+    fi
     sleep 5
   done
 

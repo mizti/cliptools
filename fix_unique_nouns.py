@@ -5,6 +5,7 @@ import os
 import sys
 from pathlib import Path
 from openai import AzureOpenAI
+from openai import APIConnectionError, APITimeoutError, APIError
 
 from utils.srt_parser import SRTBlock, blocks_to_text, parse_srt_blocks, validate_srt
 
@@ -38,15 +39,21 @@ def build_client() -> AzureOpenAI:
     )
 
 
-def call_model(client: AzureOpenAI, deployment: str, system_prompt: str, dictionary_text: str, srt_text: str) -> str:
-    """Call the model once for a given SRT chunk and return its content.
+def call_model(
+    client: AzureOpenAI,
+    deployment: str,
+    system_prompt: str,
+    dictionary_text: str,
+    srt_text: str,
+    *,
+    timeout_seconds: float = 60.0,
+    max_retries: int = 3,
+) -> str:
+    """Call the model for a given SRT chunk with timeout & retry.
 
-    The SRT text should be a sequence of complete SRT blocks. The function
-    prepares the user content as:
-
-        [dictionary]
-        -----SRT-----
-        [srt_text]
+    - 1分 (timeout_seconds) 待っても応答がなければタイムアウト扱い
+    - 最大 max_retries 回まで再試行
+    - すべて失敗した場合は例外を投げる（呼び出し側でオリジナルにフォールバック）
     """
 
     user_content_parts = []
@@ -56,18 +63,38 @@ def call_model(client: AzureOpenAI, deployment: str, system_prompt: str, diction
     user_content_parts.append(srt_text)
     user_content = "\n".join(user_content_parts)
 
-    resp = client.chat.completions.create(
-        model=deployment,
-        max_completion_tokens=4000,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
-    )
+    last_err: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = client.chat.completions.create(
+                model=deployment,
+                max_completion_tokens=4000,
+                timeout=timeout_seconds,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+            )
+            choice = resp.choices[0]
+            content = choice.message.content or ""
+            return content
+        except (APITimeoutError, APIConnectionError, APIError) as e:  # noqa: PERF203
+            last_err = e
+            print(
+                f"[fix_proper_nouns_gpt] API error on attempt {attempt}/{max_retries}: {e}",
+                file=sys.stderr,
+            )
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            print(
+                f"[fix_proper_nouns_gpt] Unexpected error on attempt {attempt}/{max_retries}: {e}",
+                file=sys.stderr,
+            )
 
-    choice = resp.choices[0]
-    content = choice.message.content or ""
-    return content
+    # ここまで来たら全リトライ失敗
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("call_model failed without specific error")
 
 
 def chunk_blocks(blocks: list[SRTBlock], size: int) -> list[list[SRTBlock]]:

@@ -131,6 +131,11 @@ elif [[ -n $URL ]]; then
 
   EXT=$($AUDIO_ONLY && echo "mp3" || echo "mp4")
   MEDIA_PATH="${OUTDIR%/}/${BASENAME}.${EXT}"
+  # -o が指定されていない場合は、ダウンロードされたメディアファイルのディレクトリを
+  # デフォルトの出力ディレクトリとして扱う（既存ファイルを処理する -f の挙動と揃える）。
+  if [[ "$OUTDIR" == "." ]]; then
+    OUTDIR=$(dirname "$MEDIA_PATH")
+  fi
 else
   # 既存ファイルを使用
   MEDIA_PATH="$MEDIA_FILE"
