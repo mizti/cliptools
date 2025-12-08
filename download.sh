@@ -133,6 +133,13 @@ else
   else
     OUTPUT_TEMPLATE="${OUTPUT_DIR%/}/${BASENAME}.%(ext)s"
     download_video "$URL" "$OUTPUT_TEMPLATE"
+    # Download thumbnail after video (highest quality available)
+    yt-dlp \
+      --skip-download \
+      --write-thumbnail \
+      --convert-thumbnails jpg \
+      --output "${OUTPUT_DIR%/}/${BASENAME}.thumb.%(ext)s" \
+      "$URL"
     echo "Full video downloaded."
   fi
 fi
