@@ -88,6 +88,41 @@ get_safe_basename() {
   echo "${raw//[^a-zA-Z0-9._-]/_}"  # sanitize to a safe filename
 }
 
+# Function to check if video is already Premiere-safe (h264 + aac + yuv420p)
+is_premiere_safe() {
+  local video_file="$1"
+  
+  # Get video codec
+  local vcodec=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$video_file" 2>/dev/null)
+  # Get audio codec
+  local acodec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$video_file" 2>/dev/null)
+  # Get pixel format
+  local pixfmt=$(ffprobe -v error -select_streams v:0 -show_entries stream=pix_fmt -of default=noprint_wrappers=1:nokey=1 "$video_file" 2>/dev/null)
+  
+  if [[ "$vcodec" == "h264" && "$acodec" == "aac" && "$pixfmt" == "yuv420p" ]]; then
+    return 0  # Safe
+  else
+    return 1  # Needs re-encode
+  fi
+}
+
+# Function to re-encode video to Premiere-safe format (H.264 + AAC)
+reencode_to_premiere() {
+  local input_file="$1"
+  local output_file="$2"
+  
+  echo "Re-encoding to Premiere-safe format (H.264 + AAC, preset=medium, CRF=18)..."
+  ffmpeg -i "$input_file" \
+    -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p \
+    -vsync cfr \
+    -video_track_timescale 30000 \
+    -c:a aac -b:a 256k \
+    -movflags +faststart \
+    -loglevel error -stats \
+    -y "$output_file"
+  echo ""  # Add newline after progress bar
+}
+
 # Main logic
 if [[ -n "$START_TIME" && -n "$END_TIME" ]]; then
   echo "Processing clip from $START_TIME to $END_TIME"
@@ -98,15 +133,34 @@ if [[ -n "$START_TIME" && -n "$END_TIME" ]]; then
     download_audio "$URL" "$TEMP_TEMPLATE"
     TEMP_FILE=$(ls "${TEMP_TEMPLATE//%(ext)s/mp3}")
     FINAL_FILE="${OUTPUT_DIR%/}/${BASENAME}.mp3"
-    ffmpeg -i "$TEMP_FILE" -ss "$START_TIME" -to "$END_TIME" -c copy "$FINAL_FILE"
+    ffmpeg -i "$TEMP_FILE" -ss "$START_TIME" -to "$END_TIME" -c copy -loglevel error -stats "$FINAL_FILE"
+    echo ""  # Add newline after progress
     rm -f "$TEMP_FILE"
     echo "Audio clip extracted to: $FINAL_FILE"
   else
+    # Video clipping mode: DL -> clip -> check -> re-encode if needed -> cleanup
     download_video "$URL" "$TEMP_TEMPLATE"
-    TEMP_FILE=$(ls "${TEMP_TEMPLATE//%(ext)s/mp4}")
+    TEMP_FULL=$(ls "${TEMP_TEMPLATE//%(ext)s/mp4}")
+    TEMP_CLIP="${OUTPUT_DIR%/}/__ytclip_clip.tmp.mp4"
     FINAL_FILE="${OUTPUT_DIR%/}/${BASENAME}.mp4"
-    ffmpeg -i "$TEMP_FILE" -ss "$START_TIME" -to "$END_TIME" -c copy "$FINAL_FILE"
-    rm -f "$TEMP_FILE"
+    
+    # Step 1: Clip from full video (fast copy)
+    echo "Clipping segment from $START_TIME to $END_TIME..."
+    ffmpeg -i "$TEMP_FULL" -ss "$START_TIME" -to "$END_TIME" -c copy -loglevel error -stats -y "$TEMP_CLIP"
+    echo ""  # Add newline after progress
+    
+    # Step 2: Check if already Premiere-safe
+    if is_premiere_safe "$TEMP_CLIP"; then
+      echo "Video is already Premiere-safe (H.264 + AAC). No re-encoding needed."
+      mv "$TEMP_CLIP" "$FINAL_FILE"
+    else
+      echo "Video needs re-encoding for Premiere compatibility."
+      reencode_to_premiere "$TEMP_CLIP" "$FINAL_FILE"
+      rm -f "$TEMP_CLIP"
+    fi
+    
+    # Step 3: Cleanup temp files
+    rm -f "$TEMP_FULL"
     echo "Video clip extracted to: $FINAL_FILE"
 
     # Adjust subtitles
@@ -131,8 +185,22 @@ else
     download_audio "$URL" "${OUTPUT_DIR%/}/${BASENAME}.%(ext)s"
     echo "Audio downloaded to: ${OUTPUT_DIR%/}/${BASENAME}.mp3"
   else
-    OUTPUT_TEMPLATE="${OUTPUT_DIR%/}/${BASENAME}.%(ext)s"
-    download_video "$URL" "$OUTPUT_TEMPLATE"
+    # Full video mode: DL -> check -> re-encode if needed -> cleanup
+    TEMP_TEMPLATE="${OUTPUT_DIR%/}/__ytclip_full.%(ext)s"
+    download_video "$URL" "$TEMP_TEMPLATE"
+    TEMP_FULL=$(ls "${TEMP_TEMPLATE//%(ext)s/mp4}")
+    FINAL_FILE="${OUTPUT_DIR%/}/${BASENAME}.mp4"
+    
+    # Check if already Premiere-safe
+    if is_premiere_safe "$TEMP_FULL"; then
+      echo "Video is already Premiere-safe (H.264 + AAC). No re-encoding needed."
+      mv "$TEMP_FULL" "$FINAL_FILE"
+    else
+      echo "Video needs re-encoding for Premiere compatibility."
+      reencode_to_premiere "$TEMP_FULL" "$FINAL_FILE"
+      rm -f "$TEMP_FULL"
+    fi
+    
     # Download thumbnail after video (highest quality available)
     yt-dlp \
       --skip-download \
@@ -140,7 +208,7 @@ else
       --convert-thumbnails jpg \
       --output "${OUTPUT_DIR%/}/${BASENAME}.thumb.%(ext)s" \
       "$URL"
-    echo "Full video downloaded."
+    echo "Full video downloaded to: $FINAL_FILE"
   fi
 fi
 
