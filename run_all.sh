@@ -127,6 +127,19 @@ elif [[ -n $URL ]]; then
     ./download.sh -u "$URL" -o "$OUTDIR" -b "$BASENAME"
   fi
 
+  ###########################################################################
+  # (optional) hype-finder: analyze live chat replay to find hype segments
+  # Runs right after download.sh, because it needs the same YouTube URL.
+  # Output goes under: $OUTDIR/hype-data/
+  ###########################################################################
+  if [[ -x ./hype_finder.sh ]]; then
+    echo "▶ 1.5/3 hype_finder.sh (live chat → hype segments)"
+    # Do not fail the whole pipeline if live_chat is unavailable for the video.
+    ./hype_finder.sh -u "$URL" -o "$OUTDIR" || echo "[warn] hype_finder failed; continuing" >&2
+  else
+    echo "[warn] ./hype_finder.sh not found/executable; skipping hype-finder" >&2
+  fi
+
   EXT=$($AUDIO_ONLY && echo "mp3" || echo "mp4")
   MEDIA_PATH="${OUTDIR%/}/${BASENAME}.${EXT}"
   # -o が指定されていない場合は、ダウンロードされたメディアファイルのディレクトリを

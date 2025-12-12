@@ -43,16 +43,27 @@ yt-dlp \
   -o "$OUTDIR/hype-data/%(id)s.%(ext)s" \
   "$URL"
 
-# Find the produced live_chat.json (there should be exactly one for this call)
-# Fallback to the expected path if glob matches once.
+# Find the produced live_chat file.
+# Note: some videos don't have live chat replay, in which case yt-dlp prints
+# "There are no subtitles..." and produces no *.live_chat.json.
+# Also, older runs may have only JSONL (already preprocessed).
+shopt -s nullglob
 json_files=("$OUTDIR"/hype-data/*.live_chat.json)
-if [[ ${#json_files[@]} -eq 0 ]]; then
-  echo "No live_chat.json found under $OUTDIR/hype-data" >&2
-  exit 1
+jsonl_files=("$OUTDIR"/hype-data/*.live_chat.jsonl)
+shopt -u nullglob
+
+if [[ ${#json_files[@]} -eq 0 && ${#jsonl_files[@]} -eq 0 ]]; then
+  echo "[hype_finder.sh] No live chat replay found for this video. hype-finder: done (skipped)." >&2
+  exit 0
 fi
-LIVE_JSON="${json_files[0]}"
 
-echo "Using live chat JSON: $LIVE_JSON" >&2
-
-# Run hype-finder
-python -m beta.hype_finder -o "$OUTDIR" --live-chat-json "$LIVE_JSON"
+# Prefer JSONL if present (faster; avoids re-parsing huge NDJSON).
+if [[ ${#jsonl_files[@]} -gt 0 ]]; then
+  LIVE_JSONL="${jsonl_files[0]}"
+  echo "[hype_finder.sh] Using live chat JSONL: $LIVE_JSONL" >&2
+  python -m beta.hype_finder -o "$OUTDIR" --live-chat-jsonl "$LIVE_JSONL"
+else
+  LIVE_JSON="${json_files[0]}"
+  echo "[hype_finder.sh] Using live chat JSON: $LIVE_JSON" >&2
+  python -m beta.hype_finder -o "$OUTDIR" --live-chat-json "$LIVE_JSON"
+fi
