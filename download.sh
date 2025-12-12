@@ -39,19 +39,143 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 
+# pyenv environments often expose Python as `python` (not `python3`).
+PYTHON_BIN=""
+if command -v python >/dev/null 2>&1; then
+  PYTHON_BIN="python"
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON_BIN="python3"
+fi
+
+# ROUTE A / ROUTE B (high level)
+#
+# This script has two separate “Route A/B” decisions:
+#
+# 1) Pre-download (format selection) — implemented in select_format_ids():
+#    - ROUTE A: If a *Premiere-safe* stream exists at/above PREFERRED_HEIGHT,
+#      download that stream directly (no forced re-encode intent).
+#      "Premiere-safe" here means: H.264 (avc1/h264) video in MP4 container + AAC audio.
+#    - ROUTE B: Otherwise, download the highest-resolution stream available (optionally
+#      preferring VP9/AV1 when FORCE_NON_PREMIERE_SAFE=1), then we may re-encode locally.
+#
+# 2) Post-download (local compatibility check) — implemented via is_premiere_safe():
+#    - If the downloaded file is already (h264 + aac + yuv420p), we keep it as-is.
+#    - Otherwise we re-encode to Premiere-safe H.264 + AAC.
+#      On macOS, we use h264_videotoolbox when available, else fall back to libx264.
+
+# Format selection (previously delegated to sandbox/select_format_ids.sh).
+select_format_ids() {
+  local video_url="$1"
+
+  # Env vars for ROUTE A/B (format selection):
+  #   PREFERRED_HEIGHT           : Route A minimum height threshold (default 1440)
+  #   FORCE_ROUTE_B=1            : skip Route A entirely (always pick Route B)
+  #   FORCE_NON_PREMIERE_SAFE=1  : in Route B, prefer VP9/AV1 (to force re-encode)
+
+  # Default changed from 1080 -> 1440.
+  local preferred_height="${PREFERRED_HEIGHT:-1440}"
+  local force_route_b="${FORCE_ROUTE_B:-0}"
+  local force_non_premiere="${FORCE_NON_PREMIERE_SAFE:-0}"
+
+  # Probe formats as JSON (avoid set -e killing the script on failure)
+  set +e
+  local json
+  json=$(yt-dlp -J --skip-download "$video_url" 2>/dev/null)
+  local status=$?
+  set -e
+
+  if [[ $status -ne 0 || -z "$json" ]]; then
+    echo "[download.sh] Failed to probe formats, falling back to defaults" >&2
+    echo ""
+    return 0
+  fi
+
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "[download.sh] jq not found; cannot parse format JSON; falling back to defaults" >&2
+    echo ""
+    return 0
+  fi
+
+  # jq-based selector. Keep behavior compatible with the previous Python parser.
+  # Output: "<video_format_id>+<audio_format_id>" or empty line to trigger fallback.
+  printf '%s' "$json" | jq -r \
+    --argjson preferred_h "$preferred_height" \
+    --argjson force_route_b "$force_route_b" \
+    --argjson force_non_premiere "$force_non_premiere" \
+    '
+def is_video: (.vcodec? // "none") != "none";
+def is_audio: (.acodec? // "none") != "none";
+def height_i: (.height? // -1) | (if type=="number" then . else (try tonumber catch -1) end);
+def has_h264: ((.vcodec? // "") | test("(avc1|h264)"));
+def has_aac: ((.acodec? // "") | test("(mp4a|aac)"));
+def is_non_premiere_video: ((.vcodec? // "") | test("(vp09|av01|vp9|av1)"));
+
+def audio_pool: (.formats // []) | map(select(is_audio));
+def best_audio:
+  (audio_pool | map(select(has_aac)) | sort_by(.abr? // 0) | last)
+  // (audio_pool | sort_by(.abr? // 0) | last);
+
+def route_a_video:
+  (.formats // [])
+  | map(select(is_video))
+  | map(select(height_i >= $preferred_h))
+  | map(select(has_h264 and (.ext? == "mp4")))
+  | sort_by(height_i)
+  | last;
+
+def route_b_video_any:
+  (.formats // []) | map(select(is_video));
+
+def route_b_video_pool:
+  if $force_non_premiere == 1 then
+    (route_b_video_any | map(select(is_non_premiere_video)) | if length>0 then . else route_b_video_any end)
+  else
+    route_b_video_any
+  end;
+
+def best_video(pool): (pool | sort_by(height_i) | last);
+
+def out_pair(v; a):
+  if (v == null) or (a == null) then empty else "\(v.format_id)+\(a.format_id)" end;
+
+if $force_route_b == 1 then
+  out_pair(best_video(route_b_video_pool); best_audio)
+else
+  (out_pair(route_a_video; best_audio))
+  // (out_pair(best_video(route_b_video_pool); best_audio))
+end
+    ' 2>/dev/null || true
+}
+
 # Function to download video + subtitles
 download_video() {
   local video_url="$1"
   local output_path="$2"
-yt-dlp -U && \
-    yt-dlp \
-    -S "res,ext" \
-    -f "bv*+ba/b" \
-    --merge-output-format mp4 \
-    --cookies-from-browser chrome \
-    --remote-components ejs:github \
-    --output "$output_path" \
-    "$video_url"
+  local fmt
+  fmt="$(select_format_ids "$video_url" | tr -d '\r\n' || true)"
+
+  if [[ -n "$fmt" ]]; then
+    echo "[download.sh] Using probed format ids: $fmt" >&2
+    yt-dlp -U && \
+      yt-dlp \
+      -f "$fmt" \
+      --merge-output-format mp4 \
+      --cookies-from-browser chrome \
+      --remote-components ejs:github \
+      --output "$output_path" \
+      "$video_url"
+  else
+    echo "[download.sh] No probed format ids; using yt-dlp defaults (-S/-f bv*+ba/b)" >&2
+    yt-dlp -U && \
+      yt-dlp \
+      -S "res,ext" \
+      -f "bv*+ba/b" \
+      --merge-output-format mp4 \
+      --cookies-from-browser chrome \
+      --remote-components ejs:github \
+      --output "$output_path" \
+      "$video_url"
+  fi
     #--convert-subs srt \
     #--write-auto-sub \
     #--write-subs \
@@ -123,6 +247,29 @@ reencode_to_premiere() {
   echo ""  # Add newline after progress bar
 }
 
+# Function to re-encode video to Premiere-safe format using VideoToolbox (Apple Silicon).
+# Falls back to libx264 if VideoToolbox isn't available.
+reencode_to_premiere_videotoolbox() {
+  local input_file="$1"
+  local output_file="$2"
+
+  if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q "h264_videotoolbox"; then
+    echo "Re-encoding to Premiere-safe format using VideoToolbox (h264_videotoolbox)..."
+    ffmpeg -i "$input_file" \
+      -c:v h264_videotoolbox -b:v 12000k -pix_fmt yuv420p \
+      -vsync cfr \
+      -video_track_timescale 30000 \
+      -c:a aac -b:a 256k \
+      -movflags +faststart \
+      -loglevel error -stats \
+      -y "$output_file"
+    echo ""
+  else
+    echo "[download.sh] h264_videotoolbox not available; falling back to libx264" >&2
+    reencode_to_premiere "$input_file" "$output_file"
+  fi
+}
+
 # Main logic
 if [[ -n "$START_TIME" && -n "$END_TIME" ]]; then
   echo "Processing clip from $START_TIME to $END_TIME"
@@ -155,7 +302,7 @@ if [[ -n "$START_TIME" && -n "$END_TIME" ]]; then
       mv "$TEMP_CLIP" "$FINAL_FILE"
     else
       echo "Video needs re-encoding for Premiere compatibility."
-      reencode_to_premiere "$TEMP_CLIP" "$FINAL_FILE"
+      reencode_to_premiere_videotoolbox "$TEMP_CLIP" "$FINAL_FILE"
       rm -f "$TEMP_CLIP"
     fi
     
@@ -169,7 +316,11 @@ if [[ -n "$START_TIME" && -n "$END_TIME" ]]; then
       DEST="${OUTPUT_DIR%/}/${BASENAME}.${lang}.srt"
       if [[ -f "$SRC" ]]; then
         echo "Adjusting SRT ($lang)..."
-        python3 "$(dirname "$0")/utils/adjust_srt_timestamp.py" \
+        if [[ -z "$PYTHON_BIN" ]]; then
+          echo "[download.sh] python not found; cannot adjust SRT timestamps" >&2
+          continue
+        fi
+        "$PYTHON_BIN" "$(dirname "$0")/utils/adjust_srt_timestamp.py" \
           "$SRC" "$DEST" "$START_TIME" "$END_TIME"
         rm "$SRC"
       else
@@ -197,7 +348,7 @@ else
       mv "$TEMP_FULL" "$FINAL_FILE"
     else
       echo "Video needs re-encoding for Premiere compatibility."
-      reencode_to_premiere "$TEMP_FULL" "$FINAL_FILE"
+      reencode_to_premiere_videotoolbox "$TEMP_FULL" "$FINAL_FILE"
       rm -f "$TEMP_FULL"
     fi
     
