@@ -1,3 +1,4 @@
 openai
 yt-dlp[default]
 spacy>=3.7.0
+matplotlib
