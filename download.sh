@@ -58,6 +58,10 @@ fi
 #    - ROUTE B: Otherwise, download the highest-resolution stream available (optionally
 #      preferring VP9/AV1 when FORCE_NON_PREMIERE_SAFE=1), then we may re-encode locally.
 #
+#    fps preference:
+#      - By default, we prefer fps>=60 *when such a stream exists* (PREFER_60FPS=1).
+#      - We do NOT force-convert 59.94 -> 60 here (no re-encode just for fps).
+#
 # 2) Post-download (local compatibility check) — implemented via is_premiere_safe():
 #    - If the downloaded file is already (h264 + aac + yuv420p), we keep it as-is.
 #    - Otherwise we re-encode to Premiere-safe H.264 + AAC.
@@ -71,11 +75,13 @@ select_format_ids() {
   #   PREFERRED_HEIGHT           : Route A minimum height threshold (default 1440)
   #   FORCE_ROUTE_B=1            : skip Route A entirely (always pick Route B)
   #   FORCE_NON_PREMIERE_SAFE=1  : in Route B, prefer VP9/AV1 (to force re-encode)
+  #   PREFER_60FPS=1             : prefer fps>=60 video formats when available (default 1)
 
   # Default changed from 1080 -> 1440.
   local preferred_height="${PREFERRED_HEIGHT:-1440}"
   local force_route_b="${FORCE_ROUTE_B:-0}"
   local force_non_premiere="${FORCE_NON_PREMIERE_SAFE:-0}"
+  local prefer_60fps="${PREFER_60FPS:-1}"
 
   # Probe formats as JSON (avoid set -e killing the script on failure)
   set +e
@@ -102,13 +108,16 @@ select_format_ids() {
     --argjson preferred_h "$preferred_height" \
     --argjson force_route_b "$force_route_b" \
     --argjson force_non_premiere "$force_non_premiere" \
+    --argjson prefer_60fps "$prefer_60fps" \
     '
 def is_video: (.vcodec? // "none") != "none";
 def is_audio: (.acodec? // "none") != "none";
 def height_i: (.height? // -1) | (if type=="number" then . else (try tonumber catch -1) end);
+def fps_f: (.fps? // 0) | (if type=="number" then . else (try tonumber catch 0) end);
 def has_h264: ((.vcodec? // "") | test("(avc1|h264)"));
 def has_aac: ((.acodec? // "") | test("(mp4a|aac)"));
 def is_non_premiere_video: ((.vcodec? // "") | test("(vp09|av01|vp9|av1)"));
+def is_60fps: (fps_f >= 60);
 
 def audio_pool: (.formats // []) | map(select(is_audio));
 def best_audio:
@@ -120,7 +129,12 @@ def route_a_video:
   | map(select(is_video))
   | map(select(height_i >= $preferred_h))
   | map(select(has_h264 and (.ext? == "mp4")))
-  | sort_by(height_i)
+  | (if $prefer_60fps == 1 then
+       (. as $all | ($all | map(select(is_60fps)) | if length>0 then . else $all end))
+     else
+       .
+     end)
+  | sort_by([fps_f, height_i])
   | last;
 
 def route_b_video_any:
@@ -133,7 +147,15 @@ def route_b_video_pool:
     route_b_video_any
   end;
 
-def best_video(pool): (pool | sort_by(height_i) | last);
+def best_video(pool):
+  (pool
+   | (if $prefer_60fps == 1 then
+        (map(select(is_60fps)) | if length>0 then . else pool end)
+      else
+        pool
+      end)
+   | sort_by([fps_f, height_i])
+   | last);
 
 def out_pair(v; a):
   if (v == null) or (a == null) then empty else "\(v.format_id)+\(a.format_id)" end;
