@@ -11,7 +11,7 @@ quickly runnable from the terminal while iterating on the parser.
 
 from pathlib import Path
 
-from srt_parser import SRTBlock, blocks_to_text, parse_srt_blocks, validate_srt
+from utils.srt_parser import SRTBlock, blocks_to_text, parse_srt_blocks, validate_srt
 
 
 def print_block(block: SRTBlock, idx: int) -> None:

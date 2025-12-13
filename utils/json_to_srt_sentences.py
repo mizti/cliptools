@@ -5,6 +5,7 @@ import json
 import math
 import os
 import sys
+import re
 from pathlib import Path
 from typing import List, Tuple
 
@@ -15,6 +16,47 @@ from .azure_spacy_segmenter import (
 )
 from .azure_types import Word
 from .srt_parser import SRTBlock, blocks_to_text, enforce_min_duration, fill_short_gaps
+
+
+def _should_drop_caption(text: str) -> bool:
+    """Return True if caption text should be dropped from SRT output.
+
+    Controlled by env vars:
+    - CLIPTOOLS_DROP_NON_SPEECH=1  : enable dropping
+    - CLIPTOOLS_DROP_TEXTS         : optional extra patterns (comma-separated)
+
+    Defaults drop patterns include common non-speech markers like '*music*'.
+    """
+
+    if os.getenv("CLIPTOOLS_DROP_NON_SPEECH", "0") not in ("1", "true", "True", "yes", "YES"):
+        return False
+
+    t = (text or "").strip()
+    if not t:
+        return True
+
+    # Default: drop common non-speech markers.
+    # If the whole caption is just a single CC-style tag like "*music*" or "*laughs*",
+    # we remove it.
+    default_patterns = [
+        r"^\*\s*[^*]+\s*\*$",
+    ]
+
+    extra = os.getenv("CLIPTOOLS_DROP_TEXTS", "").strip()
+    extra_patterns: List[str] = []
+    if extra:
+        # Treat comma-separated values as regexes.
+        extra_patterns = [p.strip() for p in extra.split(",") if p.strip()]
+
+    for pat in [*default_patterns, *extra_patterns]:
+        try:
+            if re.match(pat, t, flags=re.IGNORECASE):
+                return True
+        except re.error:
+            # Ignore invalid user-supplied regex.
+            continue
+
+    return False
 
 
 def to_seconds(pt: str) -> float:
@@ -116,6 +158,9 @@ def generate_srt_for_speaker(json_path: Path, speaker: int) -> str:
         min_chars=min_chars,
         preferred_max_chars=preferred_max_chars,
     )
+
+    # Drop non-speech segments (e.g., *music*) if configured.
+    segments_data = [seg for seg in segments_data if not _should_drop_caption(seg.text)]
     # Convert segments into SRTBlock list
     blocks: List[SRTBlock] = []
     for idx, seg in enumerate(segments_data, start=1):

@@ -14,6 +14,7 @@
 #   -u|--url       : ダウンロードしたい YouTube URL               (必須)
 #   -o|--outdir    : 出力ディレクトリ (既定: カレント)
 #   -l|--locale    : 字幕生成言語     (既定: en-US   → SpeakerX_en-US.srt)
+#   --engine       : STT エンジン (azure|whispercpp) ※省略時は generate_srt.sh のデフォルト(whispercpp)
 #   -n <N>            : 話者数を N に固定               （-m/-N と排他）
 #   -m <MIN>          : 最小話者数
 #   -N/-M <MAX>       : 最大話者数
@@ -27,6 +28,9 @@
 # ▸ 既存ファイルを 1 人話者で字幕→翻訳
 #     ./run_all.sh -f lecture.mp4 -n 1
 #
+# ▸ Azure を使って字幕を生成したい場合
+#     ./run_all.sh -f lecture.mp4 --engine azure -n 1
+#
 # ▸ DLを省略して既存ファイルを入力に指定
 #     ./run_all.sh -f work/video.mp4 -o work
 #
@@ -37,8 +41,9 @@ set -Eeuo pipefail
 URL=""               # YouTube URL
 MEDIA_FILE=""        # 既存ファイル
 OUTDIR="."
-FROM_JSON=""         # 既存の Azure STT JSON から開始
+FROM_JSON=""         # 既存の STT JSON（内部フォーマット: azure-stt.json）から開始
 LOCALE="en-US"
+ENGINE=""          # azure|whispercpp. 空なら generate_srt.sh 側のデフォルトに任せる
 START="" END=""
 AUDIO_ONLY=false
 
@@ -58,6 +63,7 @@ while [[ $# -gt 0 ]]; do
   -f|--file)  MEDIA_FILE="$2";shift 2 ;;
     -o|--outdir)OUTDIR="$2";    shift 2 ;;
     -l|--locale)LOCALE="$2";    shift 2 ;;
+    --engine)   ENGINE="$2";    shift 2 ;;
     --clip)     START="$2"; END="$3"; shift 3 ;;
     --audio)    AUDIO_ONLY=true;shift ;;
     -n|--spk)   FIX_SPK="$2";   shift 2 ;;
@@ -68,6 +74,11 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
+
+if [[ -n "$ENGINE" && ! "$ENGINE" =~ ^(azure|whispercpp)$ ]]; then
+  echo "Error: --engine は azure|whispercpp で指定してください" >&2
+  exit 1
+fi
 
 # ────────────── 相互排他チェック
 if [[ -n $FROM_JSON && -n $URL ]]; then
@@ -97,9 +108,9 @@ fi
 ###############################################################################
 MEDIA_PATH=""
 if [[ -n $FROM_JSON ]]; then
-  # 既存の Azure STT JSON から開始する場合は download.sh をスキップし、
+  # 既存の STT JSON（内部フォーマット）から開始する場合は download.sh をスキップし、
   # generate_srt.sh の --from-json 経路だけを使う。
-  echo "▶ 1/3 既存 Azure STT JSON 使用: $FROM_JSON"
+  echo "▶ 1/3 既存 STT JSON 使用: $FROM_JSON"
 elif [[ -n $URL ]]; then
   # download.sh と同じロジックで安全なベース名を決める
   get_safe_basename() {
@@ -170,6 +181,7 @@ fi
 ###############################################################################
 echo "▶ 2/3 generate_srt.sh ($LOCALE)"
 GEN_ARGS=()
+[[ -n $ENGINE ]] && GEN_ARGS+=( --engine "$ENGINE" )
 [[ -n $FIX_SPK ]] && GEN_ARGS+=( -n "$FIX_SPK" )
 [[ -n $MIN_SPK ]] && GEN_ARGS+=( -m "$MIN_SPK" )
 [[ -n $MAX_SPK ]] && GEN_ARGS+=( -M "$MAX_SPK" )

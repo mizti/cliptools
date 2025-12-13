@@ -26,14 +26,18 @@ trap err_trap ERR
 
 # ---- 引数処理 -----------------------------------------------------------------
 usage(){
-  echo "Usage: $0 [-o OUTDIR] [-n NUM] [-m MIN] [-M MAX] <audio.(wav|mp4)> [en-US|ja-JP]" >&2
+  echo "Usage: $0 [--engine azure|whispercpp] [-o OUTDIR] [-n NUM] [-m MIN] [-M MAX] <audio.(wav|mp4|m4a|flac|aac)> [en-US|ja-JP]" >&2
   echo "       $0 --from-json <tmp_script.json> [-o OUTDIR] [en-US|ja-JP]" >&2
   exit 1
 }
 OUTDIR=""   # 明示指定がなければ音声ファイルと同じディレクトリに出力
 MIN_SPK=""; MAX_SPK=""; BOTH_SPK=""; FROM_JSON=""
+ENGINE="whispercpp"   # azure | whispercpp
+WHISPER_MODEL_BIN="${WHISPER_MODEL_BIN:-$HOME/.cache/whisper.cpp/models/ggml-large-v3-turbo.bin}"
+WHISPER_NO_GPU="${WHISPER_NO_GPU:-0}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --engine) ENGINE="$2"; shift 2 ;;
     --from-json) FROM_JSON="$2"; shift 2 ;;
     -o|--outdir) OUTDIR="$2"; shift 2 ;;
     -n) BOTH_SPK="$2"; shift 2 ;;
@@ -54,6 +58,7 @@ else
   AUDIO="$1"; LOCALE="${2:-en-US}"
 fi
 [[ "$LOCALE" =~ ^(en-US|ja-JP)$ ]] || { echo "locale は en-US/ja-JP で指定" >&2; exit 1; }
+[[ "$ENGINE" =~ ^(azure|whispercpp)$ ]] || { echo "engine は azure|whispercpp で指定" >&2; exit 1; }
 if [[ -n $BOTH_SPK ]]; then MIN_SPK=$BOTH_SPK; MAX_SPK=$BOTH_SPK; fi
 : "${MIN_SPK:=1}"; : "${MAX_SPK:=1}"
 
@@ -76,19 +81,12 @@ else
     OUTDIR_ABS="$DIR"
   fi
   MONO="${DIR}/${BASE}_mono.wav"
-  # Azure STT のマージ結果をクリップごとの出力ディレクトリに永続化
+  # STT のマージ結果（内部フォーマット）をクリップごとの出力ディレクトリに永続化
   TMP_JSON="${OUTDIR_ABS}/azure-stt.json"
 fi
 start_ts=$(date +%s)
 
 if [[ -z $FROM_JSON ]]; then
-  # ---- 必須環境変数 -------------------------------------------------------------
-  step "env var check"
-  for v in STORAGE_ACCOUNT_NAME STORAGE_ACCOUNT_KEY CONTAINER_NAME \
-           SPEECH_REGION SPEECH_KEY; do
-    [[ -n ${!v:-} ]] || { echo "環境変数 $v が未設定" >&2; exit 1; }
-  done
-
   # ---- 1 FFmpeg ---------------------------------------------------------------
   step "FFmpeg mono convert"
   if [[ $DEBUG == true ]]; then
@@ -97,43 +95,51 @@ if [[ -z $FROM_JSON ]]; then
     ffmpeg -y -loglevel error -i "$AUDIO" -ac 1 "$MONO"
   fi
 
-  # ---- 2 Container cleanup ----------------------------------------------------
-  step "Clear container"
-  az storage blob delete-batch \
-    --account-name "$STORAGE_ACCOUNT_NAME" \
-    --account-key  "$STORAGE_ACCOUNT_KEY" \
-    -s "$CONTAINER_NAME" >/dev/null
+  if [[ "$ENGINE" == "azure" ]]; then
+    # ---- 必須環境変数 -------------------------------------------------------------
+    step "env var check (azure)"
+    for v in STORAGE_ACCOUNT_NAME STORAGE_ACCOUNT_KEY CONTAINER_NAME \
+             SPEECH_REGION SPEECH_KEY; do
+      [[ -n ${!v:-} ]] || { echo "環境変数 $v が未設定" >&2; exit 1; }
+    done
 
-  # ---- 3 Blob upload ----------------------------------------------------------
-  step "Blob upload"
-  az storage blob upload \
-    --account-name "$STORAGE_ACCOUNT_NAME" \
-    --account-key  "$STORAGE_ACCOUNT_KEY" \
-    --container-name "$CONTAINER_NAME" \
-    --name "${BASE}.wav" --file "$MONO" --overwrite true
+    # ---- 2 Container cleanup ----------------------------------------------------
+    step "Clear container"
+    az storage blob delete-batch \
+      --account-name "$STORAGE_ACCOUNT_NAME" \
+      --account-key  "$STORAGE_ACCOUNT_KEY" \
+      -s "$CONTAINER_NAME" >/dev/null
 
-  # ---- 4 SAS ------------------------------------------------------------------
-  step "SAS generate"
-  EXP=$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%MZ' 2>/dev/null || \
-        date -u -v+1H '+%Y-%m-%dT%H:%MZ')
-  FILE_SAS=$(az storage blob generate-sas -o tsv \
-    --account-name "$STORAGE_ACCOUNT_NAME" --container-name "$CONTAINER_NAME" \
-    --name "${BASE}.wav" --permissions r --https-only --expiry "$EXP" \
-    --account-key "$STORAGE_ACCOUNT_KEY")
-  CONT_SAS=$(az storage container generate-sas -o tsv \
-    --account-name "$STORAGE_ACCOUNT_NAME" --name "$CONTAINER_NAME" \
-    --permissions rl --https-only --expiry "$EXP" \
-    --account-key "$STORAGE_ACCOUNT_KEY")
-  FILE_URL="https://${STORAGE_ACCOUNT_NAME}.blob.core.windows.net/${CONTAINER_NAME}/${BASE}.wav?${FILE_SAS}"
-  CONT_URL="https://${STORAGE_ACCOUNT_NAME}.blob.core.windows.net/${CONTAINER_NAME}/?${CONT_SAS}"
+    # ---- 3 Blob upload ----------------------------------------------------------
+    step "Blob upload"
+    az storage blob upload \
+      --account-name "$STORAGE_ACCOUNT_NAME" \
+      --account-key  "$STORAGE_ACCOUNT_KEY" \
+      --container-name "$CONTAINER_NAME" \
+      --name "${BASE}.wav" --file "$MONO" --overwrite true
 
-  # ---- 5 Transcription job ----------------------------------------------------
-  step "Create transcription"
-  ENDP="https://${SPEECH_REGION}.api.cognitive.microsoft.com"
-  API="speechtotext/v3.2/transcriptions"
-  BODY=$(mktemp)
-  if [[ -n ${SPEECH_CUSTOM_MODEL_SELF:-} ]]; then
-  cat >"$BODY" <<JSON
+    # ---- 4 SAS ------------------------------------------------------------------
+    step "SAS generate"
+    EXP=$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%MZ' 2>/dev/null || \
+          date -u -v+1H '+%Y-%m-%dT%H:%MZ')
+    FILE_SAS=$(az storage blob generate-sas -o tsv \
+      --account-name "$STORAGE_ACCOUNT_NAME" --container-name "$CONTAINER_NAME" \
+      --name "${BASE}.wav" --permissions r --https-only --expiry "$EXP" \
+      --account-key "$STORAGE_ACCOUNT_KEY")
+    CONT_SAS=$(az storage container generate-sas -o tsv \
+      --account-name "$STORAGE_ACCOUNT_NAME" --name "$CONTAINER_NAME" \
+      --permissions rl --https-only --expiry "$EXP" \
+      --account-key "$STORAGE_ACCOUNT_KEY")
+    FILE_URL="https://${STORAGE_ACCOUNT_NAME}.blob.core.windows.net/${CONTAINER_NAME}/${BASE}.wav?${FILE_SAS}"
+    CONT_URL="https://${STORAGE_ACCOUNT_NAME}.blob.core.windows.net/${CONTAINER_NAME}/?${CONT_SAS}"
+
+    # ---- 5 Transcription job ----------------------------------------------------
+    step "Create transcription"
+    ENDP="https://${SPEECH_REGION}.api.cognitive.microsoft.com"
+    API="speechtotext/v3.2/transcriptions"
+    BODY=$(mktemp)
+    if [[ -n ${SPEECH_CUSTOM_MODEL_SELF:-} ]]; then
+    cat >"$BODY" <<JSON
 {
   "displayName":"$BASE",
   "locale":"$LOCALE",
@@ -149,8 +155,8 @@ if [[ -z $FROM_JSON ]]; then
   }
 }
 JSON
-  else
-  cat >"$BODY" <<JSON
+    else
+    cat >"$BODY" <<JSON
 {
   "displayName":"$BASE",
   "locale":"$LOCALE",
@@ -165,61 +171,96 @@ JSON
   }
 }
 JSON
-  fi
-  REST_OPTS=(--skip-authorization-header --method post --uri "$ENDP/$API" \
-    --headers "Ocp-Apim-Subscription-Key=$SPEECH_KEY" --body @"$BODY")
-  [[ $DEBUG == true ]] && REST_OPTS+=(--debug)
-  CREATE=$(az rest "${REST_OPTS[@]}")
-  rm -f "$BODY"
-  JOB_URL=$(echo "$CREATE" | jq -r .self)
-  STATUS_URL="${JOB_URL}?api-version=3.2-preview.2"
+    fi
+    REST_OPTS=(--skip-authorization-header --method post --uri "$ENDP/$API" \
+      --headers "Ocp-Apim-Subscription-Key=$SPEECH_KEY" --body @"$BODY")
+    [[ $DEBUG == true ]] && REST_OPTS+=(--debug)
+    CREATE=$(az rest "${REST_OPTS[@]}")
+    rm -f "$BODY"
+    JOB_URL=$(echo "$CREATE" | jq -r .self)
+    STATUS_URL="${JOB_URL}?api-version=3.2-preview.2"
 
-  # ---- 6 Polling --------------------------------------------------------------
-  step "Polling job status"
-  echo -n "Processing" >&2
-  # 軽量リトライ: az rest が一時的に失敗しても数回までは許容する
-  FAIL_COUNT=0
-  MAX_FAIL=3
-  while :; do
-    if STATUS=$(az rest --skip-authorization-header --method get --uri "$STATUS_URL" \
-              --headers "Ocp-Apim-Subscription-Key=$SPEECH_KEY" \
-              --query status -o tsv 2>/dev/null); then
-      echo -n "." >&2
-      [[ $STATUS == Succeeded ]] && { echo " ok" >&2; break; }
-      [[ $STATUS == Failed    ]] && { echo " failed" >&2; exit 3; }
-      FAIL_COUNT=0   # 通ったらカウンタリセット
-    else
-      FAIL_COUNT=$((FAIL_COUNT+1))
-      echo -n "x" >&2
-      if (( FAIL_COUNT >= MAX_FAIL )); then
-        echo " polling API failed ${FAIL_COUNT} times" >&2
-        exit 2
+    # ---- 6 Polling --------------------------------------------------------------
+    step "Polling job status"
+    echo -n "Processing" >&2
+    # 軽量リトライ: az rest が一時的に失敗しても数回までは許容する
+    FAIL_COUNT=0
+    MAX_FAIL=3
+    while :; do
+      if STATUS=$(az rest --skip-authorization-header --method get --uri "$STATUS_URL" \
+                --headers "Ocp-Apim-Subscription-Key=$SPEECH_KEY" \
+                --query status -o tsv 2>/dev/null); then
+        echo -n "." >&2
+        [[ $STATUS == Succeeded ]] && { echo " ok" >&2; break; }
+        [[ $STATUS == Failed    ]] && { echo " failed" >&2; exit 3; }
+        FAIL_COUNT=0   # 通ったらカウンタリセット
+      else
+        FAIL_COUNT=$((FAIL_COUNT+1))
+        echo -n "x" >&2
+        if (( FAIL_COUNT >= MAX_FAIL )); then
+          echo " polling API failed ${FAIL_COUNT} times" >&2
+          exit 2
+        fi
+      fi
+      sleep 5
+    done
+
+    # ---- 7 Segment list ---------------------------------------------------------
+    step "Get segment list"
+    FILES_URL="${JOB_URL}/files?api-version=3.2-preview.2"
+    FILES_JSON=$(az rest --skip-authorization-header --method get --uri "$FILES_URL" \
+                  --headers "Ocp-Apim-Subscription-Key=$SPEECH_KEY")
+
+    # ---- 8 Download segments ----------------------------------------------------
+    step "Download segments"
+    TMP_DIR=$(mktemp -d)
+    idx=0
+    echo "$FILES_JSON" | jq -r \
+      '.values[] | select(.kind=="Transcription") | .links.contentUrl' |
+    while read -r url; do
+      curl -s -H "Ocp-Apim-Subscription-Key:$SPEECH_KEY" \
+           "$url" -o "$TMP_DIR/seg_${idx}.json"
+      idx=$((idx+1))
+    done
+
+    # ---- 9 Merge ---------------------------------------------------------------
+    step "Merge → $TMP_JSON"
+    jq -s '[ .[] .recognizedPhrases[] ]' "$TMP_DIR"/seg_*.json > "$TMP_JSON"
+
+  else
+    # ---- whispercpp STT --------------------------------------------------------
+    step "Whisper.cpp STT (whisper-cli)"
+    command -v whisper-cli >/dev/null || { echo "whisper-cli が見つかりません (brew install whisper-cpp)" >&2; exit 1; }
+    [[ -f "$WHISPER_MODEL_BIN" ]] || { echo "WHISPER_MODEL_BIN が見つかりません: $WHISPER_MODEL_BIN" >&2; exit 1; }
+
+    # locale -> whisper language
+    WHISPER_LANG="auto"
+    [[ "$LOCALE" == "en-US" ]] && WHISPER_LANG="en"
+    [[ "$LOCALE" == "ja-JP" ]] && WHISPER_LANG="ja"
+
+    # whisper-cli writes "<output-file>.json" when JSON output is enabled.
+    WHISPER_OUT_BASE="${OUTDIR_ABS}/${BASE}"
+    WHISPER_JSON="${WHISPER_OUT_BASE}.json"
+
+    WHISPER_ARGS=(--model "$WHISPER_MODEL_BIN" --language "$WHISPER_LANG" --output-json-full --output-file "$WHISPER_OUT_BASE")
+    [[ "$WHISPER_NO_GPU" == "1" ]] && WHISPER_ARGS+=(--no-gpu)
+    [[ $DEBUG == true ]] && WHISPER_ARGS+=(--print-progress)
+
+    # First try
+    if ! whisper-cli "${WHISPER_ARGS[@]}" "$MONO"; then
+      # Fallback to CPU if GPU path fails
+      if [[ "$WHISPER_NO_GPU" != "1" ]]; then
+        echo "whisper-cli failed. retry with --no-gpu ..." >&2
+        whisper-cli "${WHISPER_ARGS[@]}" --no-gpu "$MONO"
+      else
+        exit 4
       fi
     fi
-    sleep 5
-  done
+    [[ -f "$WHISPER_JSON" ]] || { echo "whisper output JSON not found: $WHISPER_JSON" >&2; exit 5; }
 
-  # ---- 7 Segment list ---------------------------------------------------------
-  step "Get segment list"
-  FILES_URL="${JOB_URL}/files?api-version=3.2-preview.2"
-  FILES_JSON=$(az rest --skip-authorization-header --method get --uri "$FILES_URL" \
-                --headers "Ocp-Apim-Subscription-Key=$SPEECH_KEY")
-
-  # ---- 8 Download segments ----------------------------------------------------
-  step "Download segments"
-  TMP_DIR=$(mktemp -d)
-  idx=0
-  echo "$FILES_JSON" | jq -r \
-    '.values[] | select(.kind=="Transcription") | .links.contentUrl' |
-  while read -r url; do
-    curl -s -H "Ocp-Apim-Subscription-Key:$SPEECH_KEY" \
-         "$url" -o "$TMP_DIR/seg_${idx}.json"
-    idx=$((idx+1))
-  done
-
-  # ---- 9 Merge ---------------------------------------------------------------
-  step "Merge → $TMP_JSON"
-  jq -s '[ .[] .recognizedPhrases[] ]' "$TMP_DIR"/seg_*.json > "$TMP_JSON"
+    step "Convert whisper JSON → Azure-like JSON ($TMP_JSON)"
+    python -m utils.whispercpp_json_to_azure_json "$WHISPER_JSON" "$TMP_JSON"
+  fi
 fi
 
 # ---- 10 SRT ------------------------------------------------------------------
