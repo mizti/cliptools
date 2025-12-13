@@ -17,6 +17,68 @@ DEBUG=${DEBUG:-false}
 step_no=0 CURRENT_STEP=""
 step() { step_no=$((step_no+1)); CURRENT_STEP="$*";
         printf '▶ STEP %-2d %s\n' "$step_no" "$CURRENT_STEP" >&2; }
+
+# ---- 軽量プログレス表示 ------------------------------------------------------
+# 長時間処理(Whisper等)の「ログがうるさい問題」を避けるため、デフォルトでは
+# 子プロセスの出力を抑制しつつスピナーだけ表示する。
+run_with_progress() {
+  local log_file="$1"; shift
+
+  # child process writes to a temp file; we both filter to stderr and save full log
+  local tmp_out
+  tmp_out=$(mktemp)
+
+  _render_percent_bar() {
+    local percent="$1"
+    [[ -z "$percent" ]] && return 0
+    # clamp 0-100
+    (( percent < 0 )) && percent=0
+    (( percent > 100 )) && percent=100
+    local width=30
+    local filled=$(( percent * width / 100 ))
+    local empty=$(( width - filled ))
+    printf '\r[%.*s%*s] %3d%%' "$filled" "##############################" "$empty" "" "$percent" >&2
+  }
+
+  # Run the command capturing all output.
+  "$@" >"$tmp_out" 2>&1 &
+  local pid=$!
+
+  # If attached to a terminal, follow progress and paint a stable percent bar.
+  # Depending on whisper.cpp version, progress output may look like:
+  #   - "whisper_print_progress_callback: progress =  42%"
+  #   - "Translating:  9%|..." (tqdm style)
+  local tail_pid=""
+  if [[ -t 2 ]]; then
+    (
+      tail -n 0 -f "$tmp_out" 2>/dev/null | while IFS= read -r line; do
+        if [[ "$line" =~ whisper_print_progress_callback:.*progress[[:space:]]*=[[:space:]]*([0-9]{1,3})% ]]; then
+          _render_percent_bar "${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ ([0-9]{1,3})%\| ]]; then
+          _render_percent_bar "${BASH_REMATCH[1]}"
+        fi
+      done
+    ) &
+    tail_pid=$!
+  fi
+
+  local ec=0
+  if ! wait "$pid"; then
+    ec=$?
+  fi
+
+  if [[ -n "$tail_pid" ]]; then
+    kill "$tail_pid" 2>/dev/null || true
+    # finish line
+    printf '\r' >&2
+    printf '\n' >&2
+  fi
+
+  mkdir -p "$(dirname "$log_file")"
+  cat "$tmp_out" >"$log_file"
+  rm -f "$tmp_out"
+  return "$ec"
+}
 err_trap() {
   local ec=$?
   printf '\e[31m✖ STEP %-2d  %s  (exit %d)\e[0m\n' \
@@ -242,16 +304,24 @@ JSON
     WHISPER_OUT_BASE="${OUTDIR_ABS}/${BASE}"
     WHISPER_JSON="${WHISPER_OUT_BASE}.json"
 
-    WHISPER_ARGS=(--model "$WHISPER_MODEL_BIN" --language "$WHISPER_LANG" --output-json-full --output-file "$WHISPER_OUT_BASE")
+    # ログは outdir/logs に集約しつつ、進捗は常に割合表示(whisper-cli 側)に一本化
+    #   - 進捗は tail+grep で "Translating:  9%|..." の行だけ stderr に表示
+    #   - それ以外の出力はログへ
+    WHISPER_ARGS=(--model "$WHISPER_MODEL_BIN" --language "$WHISPER_LANG" --output-json-full --output-file "$WHISPER_OUT_BASE" --print-progress)
     [[ "$WHISPER_NO_GPU" == "1" ]] && WHISPER_ARGS+=(--no-gpu)
-    [[ $DEBUG == true ]] && WHISPER_ARGS+=(--print-progress)
+    :
+
+  LOG_DIR="${OUTDIR_ABS}/logs"
+  mkdir -p "$LOG_DIR"
+  WHISPER_LOG="${LOG_DIR}/${BASE}_whisper.log"
+  rm -f "$WHISPER_LOG"
 
     # First try
-    if ! whisper-cli "${WHISPER_ARGS[@]}" "$MONO"; then
+    if ! run_with_progress "$WHISPER_LOG" whisper-cli "${WHISPER_ARGS[@]}" "$MONO"; then
       # Fallback to CPU if GPU path fails
       if [[ "$WHISPER_NO_GPU" != "1" ]]; then
         echo "whisper-cli failed. retry with --no-gpu ..." >&2
-        whisper-cli "${WHISPER_ARGS[@]}" --no-gpu "$MONO"
+        run_with_progress "$WHISPER_LOG" whisper-cli "${WHISPER_ARGS[@]}" --no-gpu "$MONO"
       else
         exit 4
       fi
