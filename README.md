@@ -29,6 +29,9 @@ YouTube 配信などの長尺動画やローカルの動画ファイルから日
 
 # 既に取得済みの STT JSON（内部フォーマット: azure-stt.json）から SRT 生成以降だけを再実行
 ./run_all.sh -j clips/workdir/azure-stt.json -o clips/workdir -l en-US
+
+# Whisper.cpp が吐いた生 JSON（whisper-cli の output-json）から、SRT 生成以降をやり直す
+./run_all.sh --from-whisper-json clips/workdir/whisper.json -o clips/workdir -l en-US
 ```
 
 ---
@@ -224,6 +227,8 @@ source .env
 - `--audio`      : 音声のみをダウンロードして処理(Option)
 - `-n` / `-m` / `-N` : 話者数の固定／最小／最大 (Option / デフォルト1)
 - `-j, --from-json` : 既にマージ済みの STT JSON（通常は `azure-stt.json`）から開始（download.sh をスキップし、generate_srt.sh の `--from-json` モードを使用）
+- `-W, --from-whisper-json` : Whisper.cpp（whisper-cli）が出力した **生 JSON** から開始。
+	まず内部フォーマット（`azure-stt.json`）に変換し、その後は `--from-json` と同じ経路で実行します（download.sh をスキップ）。
 
 ---
 
@@ -238,6 +243,12 @@ source .env
 - 音声だけのダウンロード（MP3, `-w/--audio-only`）
 - 開始／終了時刻を指定したクリップ抽出（`-s/--start`, `-e/--end`）
 - **Premiere Pro 互換の動画形式への自動変換**（H.264 + AAC, 60fps などは維持）
+
+（補足）60fps を優先して落としたい場合:
+
+- `download.sh` は、元動画に **fps>=60 のストリームが存在する場合はそれを優先**して選びます（デフォルトON）。
+- これは「60fps ストリームがあれば選ぶ」だけで、59.94→60 などの **フレームレート変換（再エンコードでの60化）はしません**。
+- 無効化したい場合は `PREFER_60FPS=0` を設定してください。
 
 #### エンコード仕様とPremiere対応
 
@@ -341,6 +352,13 @@ Azure エンジン使用時に必要な環境変数:
 
 - `OUTDIR` 配下に `Speaker1_en-US.srt` のような形で話者ごとの SRT が生成されます。
 - 通常モードでは、同じディレクトリに `azure-stt.json` も保存され、後から `--from-json` で再利用できます。
+
+（補足）Whisper.cpp のログと稀な UTF-8 警告:
+
+- Whisper.cpp 実行ログは `OUTDIR/logs/` 配下に保存されます（端末には進捗だけ表示）。
+- 長尺などで Whisper の JSON に不正な UTF-8 が混ざることがあり、その場合は変換時に
+	`Warning: ... invalid UTF-8 ... replacing ...` のような警告が出ます。
+	この警告が出ても処理は継続し、文字化け箇所は `�`（U+FFFD）に置換されます。
 
 ---
 

@@ -68,7 +68,9 @@ run_with_progress() {
   fi
 
   if [[ -n "$tail_pid" ]]; then
+    # The tail pipeline may already have exited (e.g., SIGPIPE). Don't surface it.
     kill "$tail_pid" 2>/dev/null || true
+    wait "$tail_pid" 2>/dev/null || true
     # finish line
     printf '\r' >&2
     printf '\n' >&2

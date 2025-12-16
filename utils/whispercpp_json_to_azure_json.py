@@ -155,7 +155,19 @@ def main(argv: List[str]) -> int:
     in_path = Path(argv[1])
     out_path = Path(argv[2])
 
-    obj = json.loads(in_path.read_text(encoding="utf-8"))
+    # whisper-cli JSON is expected to be UTF-8, but in rare cases we've observed
+    # a tiny amount of invalid byte sequences in the file (possibly from an
+    # interrupted write or non-UTF8 token text). To keep the pipeline robust,
+    # decode with replacement and warn if replacement occurred.
+    raw = in_path.read_bytes()
+    text = raw.decode("utf-8", errors="replace")
+    repl_count = text.count("\ufffd")
+    if repl_count:
+        print(
+            f"Warning: {in_path} contains {repl_count} invalid UTF-8 byte(s); replacing with U+FFFD",
+            file=sys.stderr,
+        )
+    obj = json.loads(text)
     records = build_azure_like_records(obj, speaker=1)
     out_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Wrote {out_path} ({len(records)} segments)", file=sys.stderr)

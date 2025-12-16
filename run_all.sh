@@ -15,6 +15,7 @@
 #   -o|--outdir    : 出力ディレクトリ (既定: カレント)
 #   -l|--locale    : 字幕生成言語     (既定: en-US   → SpeakerX_en-US.srt)
 #   --engine       : STT エンジン (azure|whispercpp) ※省略時は generate_srt.sh のデフォルト(whispercpp)
+#   -W|--from-whisper-json : whisper-cli が出力した JSON から開始（内部フォーマットに変換して続行）
 #   -n <N>            : 話者数を N に固定               （-m/-N と排他）
 #   -m <MIN>          : 最小話者数
 #   -N/-M <MAX>       : 最大話者数
@@ -42,6 +43,7 @@ URL=""               # YouTube URL
 MEDIA_FILE=""        # 既存ファイル
 OUTDIR="."
 FROM_JSON=""         # 既存の STT JSON（内部フォーマット: azure-stt.json）から開始
+FROM_WHISPER_JSON="" # 既存の whisper-cli JSON から開始（内部フォーマットに変換して続行）
 LOCALE="en-US"
 ENGINE=""          # azure|whispercpp. 空なら generate_srt.sh 側のデフォルトに任せる
 START="" END=""
@@ -70,6 +72,7 @@ while [[ $# -gt 0 ]]; do
     -m|--min)   MIN_SPK="$2";   shift 2 ;;
   -N|--max|-M)MAX_SPK="$2";   shift 2 ;;
   -j|--from-json)FROM_JSON="$2"; shift 2 ;;
+  -W|--from-whisper-json)FROM_WHISPER_JSON="$2"; shift 2 ;;
     -h|--help)  show_help; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
@@ -81,17 +84,26 @@ if [[ -n "$ENGINE" && ! "$ENGINE" =~ ^(azure|whispercpp)$ ]]; then
 fi
 
 # ────────────── 相互排他チェック
+if [[ -n $FROM_JSON && -n $FROM_WHISPER_JSON ]]; then
+  echo "Error: --from-json と --from-whisper-json は同時に指定できません" >&2; exit 1
+fi
 if [[ -n $FROM_JSON && -n $URL ]]; then
   echo "Error: --from-json と -u は同時に指定できません" >&2; exit 1
 fi
 if [[ -n $FROM_JSON && -n $MEDIA_FILE ]]; then
   echo "Error: --from-json と -f は同時に指定できません" >&2; exit 1
 fi
+if [[ -n $FROM_WHISPER_JSON && -n $URL ]]; then
+  echo "Error: --from-whisper-json と -u は同時に指定できません" >&2; exit 1
+fi
+if [[ -n $FROM_WHISPER_JSON && -n $MEDIA_FILE ]]; then
+  echo "Error: --from-whisper-json と -f は同時に指定できません" >&2; exit 1
+fi
 if [[ -n $URL && -n $MEDIA_FILE ]]; then
   echo "Error: -u と -f は同時に指定できません" >&2; exit 1
 fi
-if [[ -z $URL && -z $MEDIA_FILE && -z $FROM_JSON ]]; then
-  echo "Error: -u か -f か --from-json のいずれかを指定してください" >&2; exit 1
+if [[ -z $URL && -z $MEDIA_FILE && -z $FROM_JSON && -z $FROM_WHISPER_JSON ]]; then
+  echo "Error: -u か -f か --from-json か --from-whisper-json のいずれかを指定してください" >&2; exit 1
 fi
 if [[ -n $FIX_SPK && ( -n $MIN_SPK || -n $MAX_SPK ) ]]; then
   echo "Error: -n は -m/-N と同時に使えません" >&2; exit 1
@@ -107,7 +119,21 @@ fi
 # 1. ダウンロード（-u の場合）
 ###############################################################################
 MEDIA_PATH=""
-if [[ -n $FROM_JSON ]]; then
+if [[ -n $FROM_WHISPER_JSON ]]; then
+  # whisper-cli JSON から内部フォーマット(azure-stt.json)へ変換して続行
+  [[ -f $FROM_WHISPER_JSON ]] || { echo "Error: ファイルがありません: $FROM_WHISPER_JSON"; exit 2; }
+
+  # -o が省略された場合は JSON ファイルと同じディレクトリを出力先にする
+  if [[ "$OUTDIR" == "." ]]; then
+    OUTDIR=$(dirname "$FROM_WHISPER_JSON")
+  fi
+  mkdir -p "$OUTDIR"
+
+  FROM_JSON="${OUTDIR%/}/azure-stt.json"
+  echo "▶ 1/3 whisper JSON → 内部 STT JSON 変換: $FROM_WHISPER_JSON → $FROM_JSON"
+  python -m utils.whispercpp_json_to_azure_json "$FROM_WHISPER_JSON" "$FROM_JSON"
+
+elif [[ -n $FROM_JSON ]]; then
   # 既存の STT JSON（内部フォーマット）から開始する場合は download.sh をスキップし、
   # generate_srt.sh の --from-json 経路だけを使う。
   echo "▶ 1/3 既存 STT JSON 使用: $FROM_JSON"
