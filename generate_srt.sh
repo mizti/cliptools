@@ -96,7 +96,8 @@ usage(){
 }
 OUTDIR=""   # 明示指定がなければ音声ファイルと同じディレクトリに出力
 MIN_SPK=""; MAX_SPK=""; BOTH_SPK=""; FROM_JSON=""
-ENGINE="whispercpp"   # azure | whispercpp
+# デフォルトの STT エンジンは Azure に戻す（必要なら --engine whispercpp を明示）
+ENGINE="azure"   # azure | whispercpp
 WHISPER_MODEL_BIN="${WHISPER_MODEL_BIN:-$HOME/.cache/whisper.cpp/models/ggml-large-v3-turbo.bin}"
 WHISPER_NO_GPU="${WHISPER_NO_GPU:-0}"
 while [[ $# -gt 0 ]]; do

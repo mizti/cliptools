@@ -10,7 +10,7 @@ YouTube 配信などの長尺動画やローカルの動画ファイルから日
 このリポジトリが提供するのは、次のような一連のパイプラインです。
 
 1. **YouTube から動画／音声をダウンロード**（`download.sh`）
-2. **Whisper.cpp / Azure Speech (STT) による自動文字起こし & 文単位 SRT 生成**（`generate_srt.sh`）
+2. **Azure Speech (STT) / Whisper.cpp による自動文字起こし & 文単位 SRT 生成**（`generate_srt.sh`）
 3. **英語 SRT の固有名詞補正**（`fix_unique_nouns.py`）
 4. **英語 SRT → 日本語 SRT 翻訳**（`translate_srt.sh` / `translate_srt_gpt.py`）
 5. **上記すべてをワンコマンドで実行**（`run_all.sh`）
@@ -58,12 +58,10 @@ spaCy ベースの文分割を使うため、英語モデルも追加でイン�
 python -m spacy download en_core_web_sm
 ```
 
-### 2-1-1. Whisper.cpp（デフォルトSTT）を使うためのセットアップ
+### 2-1-1. Whisper.cpp（任意: ローカルSTT）を使うためのセットアップ
 
-このリポジトリでは、`generate_srt.sh` のデフォルト STT としてローカル実行の
-`whisper-cpp`（whisper.cpp）を使えるようにしています。
-
-Azure Speech を使いたい場合は `--engine azure` を明示してください。
+このリポジトリでは、`generate_srt.sh` のデフォルト STT は **Azure Speech** です。
+ローカル実行の `whisper-cpp`（whisper.cpp）を使いたい場合は `--engine whispercpp` を明示してください。
 
 #### whisper-cpp のインストール（macOS / Homebrew）
 
@@ -293,13 +291,13 @@ source .env
 `generate_srt.sh` は、編集済み音声ファイル（または動画）から文字起こしを実行し、
 spaCy ベースの文分割で「読みやすい長さ」の SRT を生成します。
 
-デフォルトの STT エンジンは **Whisper.cpp（ローカル実行）** です。
-Azure Speech を使いたい場合は `--engine azure` を明示します。
+デフォルトの STT エンジンは **Azure Speech** です。
+Whisper.cpp（ローカル実行）を使いたい場合は `--engine whispercpp` を明示します。
 
 主な処理フロー:
 
 1. FFmpeg でモノラル WAV に変換
-2. STT 実行（デフォルト: Whisper.cpp / オプション: Azure Speech）
+2. STT 実行（デフォルト: Azure Speech / オプション: Whisper.cpp）
 3. 出力ディレクトリに `azure-stt.json` を保存（内部フォーマット）
 4. `python -m utils.json_to_srt_sentences` で適度な長さの文単位の SRT を生成 (文を適切な長さで分割するためにSpaCyを利用)
 
@@ -312,7 +310,7 @@ Azure Speech を使いたい場合は `--engine azure` を明示します。
 
 主なオプション:
 
-- `--engine azure|whispercpp` : 利用する STT エンジン（省略時: **whispercpp**）
+- `--engine azure|whispercpp` : 利用する STT エンジン（省略時: **azure**）
 - `-o OUTDIR`      : 出力先ディレクトリ（省略時は入力ファイル／JSON と同じディレクトリ）
 - `-n NUM`         : 話者数を固定（例: `-n 1` で 1 人）
 - `-m MIN`         : 話者数の最小値
@@ -320,7 +318,7 @@ Azure Speech を使いたい場合は `--engine azure` を明示します。
 - `--from-json`    : 既に取得済みの STT JSON（内部フォーマット。通常は `azure-stt.json`）から SRT のみ再生成するモード
 - `LOCALE`         : `en-US` または `ja-JP`（省略時は `en-US`）
 
-Whisper.cpp エンジン関連の環境変数:
+Whisper.cpp エンジン関連の環境変数（`--engine whispercpp` のとき）:
 
 - `WHISPER_MODEL_BIN` : モデルファイルのパス（既定: `~/.cache/whisper.cpp/models/ggml-large-v3-turbo.bin`）
 - `WHISPER_NO_GPU=1`  : GPU を無効化して CPU 実行
@@ -341,11 +339,11 @@ Azure エンジン使用時に必要な環境変数:
 例:
 
 ```bash
-# default (whispercpp)
+# default (azure)
 ./generate_srt.sh input.mp4 en-US
 
-# Azure を使う
-./generate_srt.sh --engine azure input.mp4 en-US
+# Whisper.cpp を使う
+./generate_srt.sh --engine whispercpp input.mp4 en-US
 ```
 
 出力:

@@ -14,7 +14,7 @@
 #   -u|--url       : ダウンロードしたい YouTube URL               (必須)
 #   -o|--outdir    : 出力ディレクトリ (既定: カレント)
 #   -l|--locale    : 字幕生成言語     (既定: en-US   → SpeakerX_en-US.srt)
-#   --engine       : STT エンジン (azure|whispercpp) ※省略時は generate_srt.sh のデフォルト(whispercpp)
+#   --engine       : STT エンジン (azure|whispercpp) ※省略時は generate_srt.sh のデフォルト(azure)
 #   -W|--from-whisper-json : whisper-cli が出力した JSON から開始（内部フォーマットに変換して続行）
 #   -n <N>            : 話者数を N に固定               （-m/-N と排他）
 #   -m <MIN>          : 最小話者数
