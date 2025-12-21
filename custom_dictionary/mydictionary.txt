@@ -49,12 +49,14 @@ Taco    Tako
 Taco    Tako
 Taco rachis	Takodachis
 Taco rachis Takodachis
+Taco tori   TAKOTORI
 Takodachi   Takodachi
 Takorachi	Takodachi
 Takorachi   Takodachi
 Takorachi, Ina	Takodachi, Ina
 Takorachi, Ina!	Takodachi, Ina!
 Takorachi, Ina.	Takodachi, Ina.
+Takanashi Kiara Takanashi Kiara
 Tako time   TAKOTIME
 Taco time   TAKOTIME
 underneath  Ane'nis

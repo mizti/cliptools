@@ -90,16 +90,21 @@ trap err_trap ERR
 
 # ---- 引数処理 -----------------------------------------------------------------
 usage(){
-  echo "Usage: $0 [--engine azure|whispercpp] [-o OUTDIR] [-n NUM] [-m MIN] [-M MAX] <audio.(wav|mp4|m4a|flac|aac)> [en-US|ja-JP]" >&2
+  echo "Usage: $0 [--engine azure|whisperx] [-o OUTDIR] [-n NUM] [-m MIN] [-M MAX] <audio.(wav|mp4|m4a|flac|aac)> [en-US|ja-JP]" >&2
   echo "       $0 --from-json <tmp_script.json> [-o OUTDIR] [en-US|ja-JP]" >&2
   exit 1
 }
 OUTDIR=""   # 明示指定がなければ音声ファイルと同じディレクトリに出力
 MIN_SPK=""; MAX_SPK=""; BOTH_SPK=""; FROM_JSON=""
-# デフォルトの STT エンジンは Azure に戻す（必要なら --engine whispercpp を明示）
-ENGINE="azure"   # azure | whispercpp
-WHISPER_MODEL_BIN="${WHISPER_MODEL_BIN:-$HOME/.cache/whisper.cpp/models/ggml-large-v3-turbo.bin}"
-WHISPER_NO_GPU="${WHISPER_NO_GPU:-0}"
+# デフォルトの STT エンジンは whisperx
+ENGINE="whisperx"   # azure | whisperx
+
+# whisperx defaults (CPU on macOS; MPS/Metal is not supported by faster-whisper/ctranslate2)
+WHISPERX_MODEL="${WHISPERX_MODEL:-large-v3-turbo}"
+WHISPERX_VAD_METHOD="${WHISPERX_VAD_METHOD:-silero}"
+# CPU-friendly default; tweak if you have CUDA.
+WHISPERX_DEVICE="${WHISPERX_DEVICE:-cpu}"
+WHISPERX_COMPUTE_TYPE="${WHISPERX_COMPUTE_TYPE:-int8}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --engine) ENGINE="$2"; shift 2 ;;
@@ -123,7 +128,7 @@ else
   AUDIO="$1"; LOCALE="${2:-en-US}"
 fi
 [[ "$LOCALE" =~ ^(en-US|ja-JP)$ ]] || { echo "locale は en-US/ja-JP で指定" >&2; exit 1; }
-[[ "$ENGINE" =~ ^(azure|whispercpp)$ ]] || { echo "engine は azure|whispercpp で指定" >&2; exit 1; }
+[[ "$ENGINE" =~ ^(azure|whisperx)$ ]] || { echo "engine は azure|whisperx で指定" >&2; exit 1; }
 if [[ -n $BOTH_SPK ]]; then MIN_SPK=$BOTH_SPK; MAX_SPK=$BOTH_SPK; fi
 : "${MIN_SPK:=1}"; : "${MAX_SPK:=1}"
 
@@ -293,46 +298,50 @@ JSON
     jq -s '[ .[] .recognizedPhrases[] ]' "$TMP_DIR"/seg_*.json > "$TMP_JSON"
 
   else
-    # ---- whispercpp STT --------------------------------------------------------
-    step "Whisper.cpp STT (whisper-cli)"
-    command -v whisper-cli >/dev/null || { echo "whisper-cli が見つかりません (brew install whisper-cpp)" >&2; exit 1; }
-    [[ -f "$WHISPER_MODEL_BIN" ]] || { echo "WHISPER_MODEL_BIN が見つかりません: $WHISPER_MODEL_BIN" >&2; exit 1; }
+    # ---- whisperx STT --------------------------------------------------------
+    step "WhisperX STT (word-level aligned)"
+    python -c "import whisperx" >/dev/null 2>&1 || { echo "Python package 'whisperx' が見つかりません (pip install -r requirements.txt)" >&2; exit 1; }
 
     # locale -> whisper language
     WHISPER_LANG="auto"
     [[ "$LOCALE" == "en-US" ]] && WHISPER_LANG="en"
     [[ "$LOCALE" == "ja-JP" ]] && WHISPER_LANG="ja"
 
-    # whisper-cli writes "<output-file>.json" when JSON output is enabled.
-    WHISPER_OUT_BASE="${OUTDIR_ABS}/${BASE}"
-    WHISPER_JSON="${WHISPER_OUT_BASE}.json"
+    LOG_DIR="${OUTDIR_ABS}/logs"
+    mkdir -p "$LOG_DIR"
+    WHISPERX_LOG="${LOG_DIR}/${BASE}_whisperx.log"
+    rm -f "$WHISPERX_LOG"
 
-    # ログは outdir/logs に集約しつつ、進捗は常に割合表示(whisper-cli 側)に一本化
-    #   - 進捗は tail+grep で "Translating:  9%|..." の行だけ stderr に表示
-    #   - それ以外の出力はログへ
-    WHISPER_ARGS=(--model "$WHISPER_MODEL_BIN" --language "$WHISPER_LANG" --output-json-full --output-file "$WHISPER_OUT_BASE" --print-progress)
-    [[ "$WHISPER_NO_GPU" == "1" ]] && WHISPER_ARGS+=(--no-gpu)
-    :
+    WHISPERX_OUT_DIR="${OUTDIR_ABS}/whisperx"
+    mkdir -p "$WHISPERX_OUT_DIR"
 
-  LOG_DIR="${OUTDIR_ABS}/logs"
-  mkdir -p "$LOG_DIR"
-  WHISPER_LOG="${LOG_DIR}/${BASE}_whisper.log"
-  rm -f "$WHISPER_LOG"
+    # whisperx writes <basename>.json into output_dir with --output_format json
+    WHISPERX_BASE="${BASE}_mono"
+    WHISPERX_JSON="${WHISPERX_OUT_DIR}/${WHISPERX_BASE}.json"
 
-    # First try
-    if ! run_with_progress "$WHISPER_LOG" whisper-cli "${WHISPER_ARGS[@]}" "$MONO"; then
-      # Fallback to CPU if GPU path fails
-      if [[ "$WHISPER_NO_GPU" != "1" ]]; then
-        echo "whisper-cli failed. retry with --no-gpu ..." >&2
-        run_with_progress "$WHISPER_LOG" whisper-cli "${WHISPER_ARGS[@]}" --no-gpu "$MONO"
-      else
-        exit 4
-      fi
+    # Note: whisperx does NOT support MPS/Metal for faster-whisper backend on macOS.
+    # Keep device/compute_type configurable via env vars.
+    WHISPERX_ARGS=(
+      -m whisperx "$MONO"
+      --model "$WHISPERX_MODEL"
+      --language "$WHISPER_LANG"
+      --device "$WHISPERX_DEVICE"
+      --compute_type "$WHISPERX_COMPUTE_TYPE"
+      --vad_method "$WHISPERX_VAD_METHOD"
+      --output_dir "$WHISPERX_OUT_DIR"
+      --output_format json
+      --print_progress True
+    )
+    if [[ $DEBUG == true ]]; then
+      python "${WHISPERX_ARGS[@]}" 2>&1 | tee "$WHISPERX_LOG"
+    else
+      run_with_progress "$WHISPERX_LOG" python "${WHISPERX_ARGS[@]}"
     fi
-    [[ -f "$WHISPER_JSON" ]] || { echo "whisper output JSON not found: $WHISPER_JSON" >&2; exit 5; }
 
-    step "Convert whisper JSON → Azure-like JSON ($TMP_JSON)"
-    python -m utils.whispercpp_json_to_azure_json "$WHISPER_JSON" "$TMP_JSON"
+    [[ -f "$WHISPERX_JSON" ]] || { echo "whisperx output JSON not found: $WHISPERX_JSON" >&2; exit 5; }
+
+    step "Convert whisperx JSON → Azure-like JSON ($TMP_JSON)"
+    python -m utils.whisperx_json_to_azure_json "$WHISPERX_JSON" "$TMP_JSON"
   fi
 fi
 

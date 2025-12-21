@@ -1,4 +1,7 @@
 openai
+whisperx
+openai-whisper
+mlx-whisper
 yt-dlp[default]
 spacy>=3.7.0
 matplotlib
