@@ -104,7 +104,18 @@ WHISPERX_MODEL="${WHISPERX_MODEL:-large-v3-turbo}"
 WHISPERX_VAD_METHOD="${WHISPERX_VAD_METHOD:-silero}"
 # CPU-friendly default; tweak if you have CUDA.
 WHISPERX_DEVICE="${WHISPERX_DEVICE:-cpu}"
-WHISPERX_COMPUTE_TYPE="${WHISPERX_COMPUTE_TYPE:-int8}"
+# Default compute type:
+# - Prefer float16 when possible (e.g. CUDA)
+# - But on CPU (macOS default), float16 is often unsupported/inefficient in ctranslate2.
+if [[ -n ${WHISPERX_COMPUTE_TYPE:-} ]]; then
+  WHISPERX_COMPUTE_TYPE="$WHISPERX_COMPUTE_TYPE"
+else
+  if [[ "$WHISPERX_DEVICE" == "cpu" ]]; then
+    WHISPERX_COMPUTE_TYPE="int8"
+  else
+    WHISPERX_COMPUTE_TYPE="float16"
+  fi
+fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --engine) ENGINE="$2"; shift 2 ;;

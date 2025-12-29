@@ -30,7 +30,6 @@ YouTube 配信などの長尺動画やローカルの動画ファイルから日
 # 既に取得済みの STT JSON（内部フォーマット: azure-stt.json）から SRT 生成以降だけを再実行
 ./run_all.sh -j clips/workdir/azure-stt.json -o clips/workdir -l en-US
 
-
 ```
 
 ---
@@ -45,6 +44,12 @@ YouTube 配信などの長尺動画やローカルの動画ファイルから日
 適宜 pyenv で Python 3.x をインストールし、このリポジトリ内で有効化したうえで:
 ```bash
 pip install -r requirements.txt
+```
+
+字幕生成（`generate_srt.sh`）では音声抽出/変換に `ffmpeg` を使用します。macOS の場合は Homebrew で入れておくのが簡単です。
+
+```bash
+brew install ffmpeg
 ```
 yt-dlpを動作させるために必要なdenoをインストールしておきます。
 ```bash
@@ -300,7 +305,7 @@ WhisperX エンジン関連の環境変数（`--engine whisperx` のとき）:
 - `WHISPERX_MODEL` : モデル名（既定: `large-v3-turbo`）
 - `WHISPERX_VAD_METHOD` : VAD（既定: `silero`）
 - `WHISPERX_DEVICE` : 実行デバイス（既定: `cpu`）
-- `WHISPERX_COMPUTE_TYPE` : 計算精度（既定: `int8`）
+- `WHISPERX_COMPUTE_TYPE` : 計算精度（既定: **CPU の場合 `int8` / GPU の場合 `float16`**。環境変数で上書き可能）
 
 字幕用途向け（非セリフを落とす）:
 
@@ -318,8 +323,11 @@ Azure エンジン使用時に必要な環境変数:
 例:
 
 ```bash
-# default (azure)
+# default (whisperx)
 ./generate_srt.sh input.mp4 en-US
+
+# Azure を使う
+./generate_srt.sh --engine azure input.mp4 en-US
 
 # WhisperX を使う（デフォルト）
 ./generate_srt.sh --engine whisperx input.mp4 en-US
