@@ -15,7 +15,15 @@ from .azure_spacy_segmenter import (
     align_segments_to_words,
 )
 from .azure_types import Word
-from .srt_parser import SRTBlock, blocks_to_text, enforce_min_duration, fill_short_gaps
+from .srt_parser import (
+    SRTBlock,
+    blocks_to_text,
+    enforce_min_duration,
+    fill_short_gaps,
+    merge_short_adjacent_blocks,
+    normalize_english_pronoun_i,
+    renumber_blocks,
+)
 
 
 def _should_drop_caption(text: str) -> bool:
@@ -173,6 +181,22 @@ def generate_srt_for_speaker(json_path: Path, speaker: int) -> str:
                 lines=[text],
             )
         )
+
+    # ---- Post-process (mechanical fixes) --------------------------------------
+    # 1) Normalize English pronoun casing (i -> I, i'm -> I'm, ...)
+    if os.getenv("CLIPTOOLS_FIX_I_CAPS", "1") in ("1", "true", "True", "yes", "YES"):
+        blocks = normalize_english_pronoun_i(blocks)
+
+    # 2) Merge very short adjacent blocks into the previous block
+    if os.getenv("CLIPTOOLS_MERGE_SHORT_BLOCKS", "1") in ("1", "true", "True", "yes", "YES"):
+        blocks = merge_short_adjacent_blocks(
+            blocks,
+            max_len=int(os.getenv("CLIPTOOLS_MERGE_MAX_LEN", "3")),
+            exceptions={"OK", "Oh", "No", "Yes"},
+        )
+
+    # Ensure indices are always contiguous after any merges.
+    blocks = renumber_blocks(blocks)
 
     # Fill short gaps so subtitles do not disappear for <threshold gaps
     blocks = fill_short_gaps(blocks, threshold=0.8)

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple
 
+import re
+
 
 @dataclass
 class SRTBlock:
@@ -26,6 +28,25 @@ class SRTBlock:
         """
 
         return "\n".join(self.lines)
+
+    def merge_with_next(self, nxt: "SRTBlock", *, sep: str = " ") -> None:
+        """Merge the *next* block into this block.
+
+        - Text is concatenated (single-line friendly by default).
+        - Timing is extended to cover the next block.
+        - Index is intentionally left unchanged; callers can renumber.
+
+        This mutates ``self`` in place.
+        """
+
+        # Merge text payload
+        left = self.text.strip()
+        right = nxt.text.strip()
+        merged = (left + (sep if (left and right) else "") + right).strip()
+        self.lines = [merged] if merged else []
+
+        # Extend time
+        self.end = nxt.end
 
 
 def _parse_timestamp_line(line: str) -> Optional[tuple[str, str]]:
@@ -218,6 +239,99 @@ def blocks_to_text(blocks: Iterable[SRTBlock]) -> str:
         out_lines.extend(b.lines)
 
     return "\n".join(out_lines) + ("\n" if out_lines else "")
+
+
+def renumber_blocks(blocks: Iterable[SRTBlock], start_index: int = 1) -> List[SRTBlock]:
+    """Return a list of blocks with contiguous indices.
+
+    This is useful after merges/splits so that the serialized SRT is always
+    sane (no missing or duplicate indices).
+    """
+
+    seq = list(blocks)
+    idx = start_index
+    for b in seq:
+        b.index = idx
+        idx += 1
+    return seq
+
+
+def merge_short_adjacent_blocks(
+    blocks: Iterable[SRTBlock],
+    *,
+    max_len: int = 3,
+    exceptions: Optional[set[str]] = None,
+) -> List[SRTBlock]:
+    """Merge blocks whose text is very short and whose start is adjacent.
+
+    Rule:
+      - If ``len(cur.text.strip()) <= max_len`` and
+      - ``prev.end == cur.start`` and
+      - ``cur.text.strip()`` is not in ``exceptions``
+    then merge cur into prev.
+    """
+
+    exc = {e.strip() for e in (exceptions or set()) if e.strip()}
+    seq: List[SRTBlock] = list(blocks)
+    if len(seq) < 2:
+        return seq
+
+    out: List[SRTBlock] = [seq[0]]
+    for cur in seq[1:]:
+        prev = out[-1]
+        cur_txt = cur.text.strip()
+        if (
+            cur_txt
+            and len(cur_txt) <= max_len
+            and cur_txt not in exc
+            and prev.end == cur.start
+        ):
+            prev.merge_with_next(cur)
+        else:
+            out.append(cur)
+    return out
+
+
+_I_CONTRACTION_RE = re.compile(r"\bi\s*'\s*(m|ve|ll|d|re|s)\b", flags=re.IGNORECASE)
+_I_BARE_RE = re.compile(r"\bi\b")
+
+
+def normalize_english_pronoun_i(blocks: Iterable[SRTBlock]) -> List[SRTBlock]:
+    """Normalize English first-person singular pronoun casing.
+
+    Converts:
+      - 'i'   -> 'I'
+      - "i'm" -> "I'm" (also handles spacing like "i ' m")
+
+    This is a mechanical post-process for STT output.
+    """
+
+    def _fix(text: str) -> str:
+        # i'xx contractions
+        def repl(m: re.Match[str]) -> str:
+            suffix = m.group(1).lower()
+            mapping = {
+                "m": "I'm",
+                "ve": "I've",
+                "ll": "I'll",
+                "d": "I'd",
+                "re": "I'm",  # uncommon; best-effort
+                "s": "I's",    # uncommon; keep mechanical
+            }
+            return mapping.get(suffix, "I" + "'" + suffix)
+
+        text = _I_CONTRACTION_RE.sub(repl, text)
+        # bare i
+        text = _I_BARE_RE.sub("I", text)
+        return text
+
+    seq = list(blocks)
+    for b in seq:
+        if not b.lines:
+            continue
+        # Preserve multi-line blocks if present.
+        b.lines = [_fix(line) for line in b.lines]
+    return seq
 
 
 def _timestamp_to_seconds(ts: str) -> float:
