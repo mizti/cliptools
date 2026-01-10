@@ -178,7 +178,7 @@ download_video() {
 
   if [[ -n "$fmt" ]]; then
     echo "[download.sh] Using probed format ids: $fmt" >&2
-    yt-dlp -U && \
+    "$PYTHON_BIN" -m pip install -U "yt-dlp[default]" && \
       yt-dlp \
       -f "$fmt" \
       --merge-output-format mp4 \
@@ -188,7 +188,7 @@ download_video() {
       "$video_url"
   else
     echo "[download.sh] No probed format ids; using yt-dlp defaults (-S/-f bv*+ba/b)" >&2
-    yt-dlp -U && \
+    "$PYTHON_BIN" -m pip install -U "yt-dlp[default]" && \
       yt-dlp \
       -S "res,ext" \
       -f "bv*+ba/b" \
@@ -210,7 +210,7 @@ download_video() {
 download_audio() {
   local audio_url="$1"
   local output_path="${2%.*}.mp3"
-yt-dlp -U && \
+  "$PYTHON_BIN" -m pip install -U "yt-dlp[default]" && \
     yt-dlp \
     -f bestaudio \
     --extract-audio \
