@@ -56,7 +56,7 @@ dst_path.touch()                # 空ファイルを生成
 client = AzureOpenAI(
     azure_endpoint=os.getenv("ENDPOINT_URL", "https://ks-ai-foundry.openai.azure.com/"),
     api_key       =os.getenv("AZURE_OPENAI_API_KEY"),
-    api_version   ="2025-01-01-preview",
+    api_version   =os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview"),
 )
 deployment = os.getenv("DEPLOYMENT_NAME", "gpt-5-chat")
 
@@ -80,6 +80,38 @@ def chunk_blocks(seq: List[SRTBlock], size: int) -> List[List[SRTBlock]]:
     """Chunk SRT blocks into groups of at most `size` blocks each."""
 
     return [seq[i : i + size] for i in range(0, len(seq), size)]
+
+
+def _get(obj, key: str, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def extract_response_text(rsp) -> str | None:
+    """Extract assistant text from a Responses API result (best-effort)."""
+
+    if rsp is None:
+        return None
+
+    text = _get(rsp, "output_text", None)
+    if isinstance(text, str):
+        return text
+
+    output = _get(rsp, "output", None) or []
+    texts: list[str] = []
+    for item in output:
+        content_parts = _get(item, "content", None) or []
+        for part in content_parts:
+            part_type = _get(part, "type", "")
+            if part_type in ("output_text", "text"):
+                t = _get(part, "text", None)
+                if isinstance(t, str) and t:
+                    texts.append(t)
+    if texts:
+        return "\n".join(texts)
+
+    return None
 
 
 BLOCKS_PER_REQUEST = 40
@@ -111,11 +143,11 @@ for idx, block_group in enumerate(
     timeout_seconds = 60.0
     for attempt in range(1, max_retries + 1):
         try:
-            rsp = client.chat.completions.create(
+            rsp = client.responses.create(
                 model=deployment,
-                messages=messages,
+                input=messages,
                 #temperature=0.3,
-                max_completion_tokens=2000,
+                max_output_tokens=20000,
                 timeout=timeout_seconds,
             )
             break        # 成功
@@ -141,13 +173,12 @@ for idx, block_group in enumerate(
         reason  = "exception"
     else:
         # ― レスポンス検証 ―
-        choice  = rsp.choices[0] if rsp.choices else None
-        content = getattr(choice.message, "content", None) if choice else None
-        reason  = getattr(choice, "finish_reason", "unknown")
+        reason = _get(rsp, "status", "unknown")
+        content = extract_response_text(rsp)
 
         if content is None:
-            print(f"[WARN] block {idx}: skipped or filtered: finish_reason={reason}", file=sys.stderr)
-            content = f"[BLOCKED: {reason}]"
+            print(f"[WARN] block {idx}: empty response: status={reason}", file=sys.stderr)
+            content = ""
 
         # ― 念のため、生成された本文から全角の句点「。」を除去してから書き出す ―
         #   GPT が指示に反して句点を付けてしまった場合でも、ここで落とすことで
