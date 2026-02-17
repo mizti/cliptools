@@ -7,6 +7,7 @@ Bae Bae
 be boo  Biboo
 Bebu    Biboo   
 biboo   Biboo
+BeeBoo	Biboo
 Bijou   Bijou
 Cali    Calli
 Caliope Calliope
@@ -60,6 +61,7 @@ Takorachi, Ina.	Takodachi, Ina.
 Takanashi Kiara Takanashi Kiara
 Tako time   TAKOTIME
 Taco time   TAKOTIME
+Tech time   TAKOTIME
 underneath  Ane'nis
 Wawa    Wawa
 whole life  Hololive
