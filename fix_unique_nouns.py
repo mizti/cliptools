@@ -1,13 +1,14 @@
 #!/usr/bin/env python
+from __future__ import annotations
+
 import argparse
 import difflib
 import os
 import sys
 from pathlib import Path
-from openai import AzureOpenAI
-from openai import APIConnectionError, APITimeoutError, APIError
 
 from utils.srt_parser import SRTBlock, blocks_to_text, parse_srt_blocks, validate_srt
+from utils.ollama_client import ollama_chat
 
 RED = "\033[31m"
 HIGHLIGHT = "\033[38;5;207m"  # bright magenta/pink-ish (after)
@@ -29,6 +30,8 @@ def read_dictionary(dict_path: Path) -> str:
 
 
 def build_client() -> AzureOpenAI:
+    from openai import AzureOpenAI
+
     endpoint = load_env("ENDPOINT_URL")
     api_key = load_env("AZURE_OPENAI_API_KEY")
     api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
@@ -40,7 +43,7 @@ def build_client() -> AzureOpenAI:
 
 
 def call_model(
-    client: AzureOpenAI,
+    backend: str,
     deployment: str,
     system_prompt: str,
     dictionary_text: str,
@@ -64,30 +67,55 @@ def call_model(
     user_content = "\n".join(user_content_parts)
 
     last_err: Exception | None = None
+    # Ollama はローカルでも応答が 60s を超えることがあるため、少し長めをデフォルトにする。
+    # 明示的に timeout_seconds が渡されていないケースでは環境変数で上書き可能。
+    if backend == "ollama" and timeout_seconds == 60.0:
+        timeout_seconds = float(os.getenv("OLLAMA_TIMEOUT_S", "240") or 240)
+    elif backend == "azure" and timeout_seconds == 60.0:
+        timeout_seconds = float(os.getenv("AZURE_TIMEOUT_S", "60") or 60)
+
     for attempt in range(1, max_retries + 1):
         try:
-            resp = client.chat.completions.create(
-                model=deployment,
-                max_completion_tokens=4000,
-                timeout=timeout_seconds,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ],
-            )
-            choice = resp.choices[0]
-            content = choice.message.content or ""
-            return content
-        except (APITimeoutError, APIConnectionError, APIError) as e:  # noqa: PERF203
-            last_err = e
-            print(
-                f"[fix_proper_nouns_gpt] API error on attempt {attempt}/{max_retries}: {e}",
-                file=sys.stderr,
-            )
+            if backend == "azure":
+                from openai import APIConnectionError, APITimeoutError, APIError
+
+                client = build_client()
+                resp = client.chat.completions.create(
+                    model=deployment,
+                    max_completion_tokens=4000,
+                    timeout=timeout_seconds,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                )
+                choice = resp.choices[0]
+                content = choice.message.content or ""
+                return content
+
+            if backend == "ollama":
+                base_url = os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434"
+                model = os.getenv("OLLAMA_MODEL_FIX") or os.getenv("OLLAMA_MODEL") or "qwen3:8b"
+
+                result = ollama_chat(
+                    base_url=base_url,
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    options={"temperature": 0},
+                    timeout_s=timeout_seconds,
+                )
+                return result.content
+
+            raise ValueError(f"Unknown backend: {backend}")
+
         except Exception as e:  # noqa: BLE001
+            # Azure/Ollama 両対応のため、例外型で分岐せずまとめてリトライ。
             last_err = e
             print(
-                f"[fix_proper_nouns_gpt] Unexpected error on attempt {attempt}/{max_retries}: {e}",
+                f"[fix_proper_nouns_llm] API error on attempt {attempt}/{max_retries}: {e}",
                 file=sys.stderr,
             )
 
@@ -136,6 +164,13 @@ def main() -> None:
         help="Path to the system prompt file for proper-noun fixing",
     )
     parser.add_argument(
+        "--backend",
+        dest="backend",
+        default=os.getenv("CLIPTOOLS_LLM_BACKEND", "ollama"),
+        choices=["ollama", "azure"],
+        help="LLM backend to use (default: ollama). Set CLIPTOOLS_LLM_BACKEND too.",
+    )
+    parser.add_argument(
         "--deployment",
         dest="deployment",
         default=os.getenv("DEPLOYMENT_NAME", "gpt-5.1-chat"),
@@ -171,7 +206,10 @@ def main() -> None:
         output_path.write_text(srt_text, encoding="utf-8")
         return
 
-    client = build_client()
+    if args.backend == "azure":
+        # ここで環境変数チェックも兼ねる（ollama のときは Azure 設定不要）
+        _ = load_env("ENDPOINT_URL")
+        _ = load_env("AZURE_OPENAI_API_KEY")
 
     # Parse SRT into structured blocks and process in chunks to avoid
     # overloading the model with extremely long inputs. We keep index
@@ -194,13 +232,19 @@ def main() -> None:
 
     for idx, block_group in enumerate(chunk_blocks(all_blocks, blocks_per_chunk), start=1):
         chunk_srt = blocks_to_text(block_group)
+
+        if args.backend == "ollama":
+            model_name = os.getenv("OLLAMA_MODEL_FIX") or os.getenv("OLLAMA_MODEL") or "qwen3:8b"
+        else:
+            model_name = args.deployment
+
         print(
-            f"[fix_proper_nouns_gpt] Calling model '{args.deployment}' for chunk {idx} (blocks {len(block_group)})...",
+            f"[fix_proper_nouns_gpt] Calling backend={args.backend} model='{model_name}' for chunk {idx} (blocks {len(block_group)})...",
             file=sys.stderr,
         )
         try:
             fixed_chunk = call_model(
-                client=client,
+                backend=args.backend,
                 deployment=args.deployment,
                 system_prompt=system_prompt,
                 dictionary_text=dictionary_text,

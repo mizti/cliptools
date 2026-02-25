@@ -13,19 +13,24 @@ import time
 from pathlib import Path
 from typing import List
 
-from openai import AzureOpenAI      # pip install openai>=1.0
-from openai import APIConnectionError, APITimeoutError, APIError
 import tqdm                         # pip install tqdm
 
 from utils.srt_parser import SRTBlock, blocks_to_text, parse_srt_blocks, validate_srt
+from utils.ollama_client import ollama_chat
 
 
 # ───────────────── CLI ──────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
 parser.add_argument('-i', '--input',      required=True, help='SRT file to translate')
 parser.add_argument('-o', '--output_dir', required=True, help='Directory to write result')
-parser.add_argument('--chunk', type=int, default=50, help='Lines per request (default: 50)')
+parser.add_argument('--chunk', type=int, default=40, help='SRT blocks per request (default: 40). Lower this if Ollama output gets truncated.')
 parser.add_argument('--debug-dump', action='store_true', help='Dump raw model response for inspection (one chunk only)')
+parser.add_argument(
+    '--backend',
+    default=os.getenv('CLIPTOOLS_LLM_BACKEND', 'ollama'),
+    choices=['ollama', 'azure'],
+    help='LLM backend to use (default: ollama). Set CLIPTOOLS_LLM_BACKEND too.',
+)
 args = parser.parse_args()
 
 src_path = Path(args.input)
@@ -52,13 +57,99 @@ if dst_path.exists():
     dst_path.unlink()           # 既存ファイルを削除
 dst_path.touch()                # 空ファイルを生成
 
-# ─────────────── Azure OpenAI クライアント ──────────────────────────────────
-client = AzureOpenAI(
-    azure_endpoint=os.getenv("ENDPOINT_URL", "https://ks-ai-foundry.openai.azure.com/"),
-    api_key       =os.getenv("AZURE_OPENAI_API_KEY"),
-    api_version   =os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview"),
-)
-deployment = os.getenv("DEPLOYMENT_NAME", "gpt-5-chat")
+def call_llm(messages: list[dict[str, str]], *, timeout_seconds: float) -> str:
+    backend = args.backend
+
+    if backend == 'azure':
+        from openai import AzureOpenAI
+        from openai import APIConnectionError, APITimeoutError, APIError
+
+        client = AzureOpenAI(
+            azure_endpoint=os.getenv('ENDPOINT_URL', 'https://ks-ai-foundry.openai.azure.com/'),
+            api_key=os.getenv('AZURE_OPENAI_API_KEY'),
+            api_version=os.getenv('AZURE_OPENAI_API_VERSION', '2025-04-01-preview'),
+        )
+        deployment = os.getenv('DEPLOYMENT_NAME', 'gpt-5-chat')
+
+        # ― リクエスト＋タイムアウト付き指数バックオフリトライ ―
+        rsp, last_err = None, None
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                rsp = client.responses.create(
+                    model=deployment,
+                    input=messages,
+                    #temperature=0.3,
+                    max_output_tokens=20000,
+                    timeout=timeout_seconds,
+                )
+                break
+            except (APITimeoutError, APIConnectionError, APIError) as e:
+                last_err = e
+                wait = 2 ** (attempt - 1)
+                print(
+                    f"[WARN] API error on attempt {attempt}/{max_retries}: {e}",
+                    file=sys.stderr,
+                )
+                time.sleep(wait)
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                wait = 2 ** (attempt - 1)
+                print(
+                    f"[WARN] unexpected error on attempt {attempt}/{max_retries}: {e}",
+                    file=sys.stderr,
+                )
+                time.sleep(wait)
+
+        if rsp is None:
+            raise RuntimeError(f"Azure OpenAI request failed: {last_err}")
+
+        content = extract_response_text(rsp)
+        if content is None:
+            return ''
+        return content
+
+    if backend == 'ollama':
+        base_url = os.getenv('OLLAMA_BASE_URL') or os.getenv('OLLAMA_HOST') or 'http://127.0.0.1:11434'
+        model = os.getenv('OLLAMA_MODEL_TRANSLATE') or os.getenv('OLLAMA_MODEL') or 'qwen3:8b'
+        # qwen3 系はチャンクの末尾が途切れて「一部ブロックだけ英語のまま」になりやすいので、
+        # デフォルトは少し大きめにしておく。
+        num_predict = int(os.getenv('OLLAMA_NUM_PREDICT', '8000') or 8000)
+
+        max_retries = int(os.getenv('OLLAMA_MAX_RETRIES', '3') or 3)
+        last_err: Exception | None = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                result = ollama_chat(
+                    base_url=base_url,
+                    model=model,
+                    messages=messages,
+                    options={
+                        'temperature': 0,
+                        'num_predict': num_predict,
+                    },
+                    timeout_s=timeout_seconds,
+                )
+                return result.content
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                wait = 2 ** (attempt - 1)
+                print(
+                    f"[WARN] Ollama error on attempt {attempt}/{max_retries}: {e}",
+                    file=sys.stderr,
+                )
+                if attempt < max_retries:
+                    time.sleep(wait)
+
+        raise RuntimeError(f"Ollama request failed after {max_retries} attempts: {last_err}")
+
+    raise ValueError(f"Unknown backend: {backend}")
+
+
+def get_model_name_for_log() -> str:
+    if args.backend == "azure":
+        return os.getenv("DEPLOYMENT_NAME", "gpt-5-chat")
+    return os.getenv("OLLAMA_MODEL_TRANSLATE") or os.getenv("OLLAMA_MODEL") or "qwen3:8b"
 
 # ─────────────── システムプロンプト読み込み ─────────────────────────────────
 prompt_path = Path("settings/system_prompt.txt")
@@ -114,7 +205,7 @@ def extract_response_text(rsp) -> str | None:
     return None
 
 
-BLOCKS_PER_REQUEST = 40
+BLOCKS_PER_REQUEST = int(args.chunk)
 
 # デバッグ: 問題のクリップで GPT 応答が SRT としてパースできない原因を調べるため、
 # 先頭いくつかのチャンクについてはモデル応答の生テキストと、パース/検証エラーを
@@ -123,6 +214,32 @@ DEBUG_LOG_RAW_CHUNKS = int(os.getenv("TRANSLATE_DEBUG_RAW_CHUNKS", "0") or 0)
 DEBUG_LOG_DIR = os.getenv("TRANSLATE_DEBUG_DIR", "clips/_translate_debug")
 
 total_chunks = (len(blocks) + BLOCKS_PER_REQUEST - 1) // BLOCKS_PER_REQUEST
+
+
+def _merge_translated_blocks_into_group(
+    *,
+    block_group: list[SRTBlock],
+    translated_blocks: list[SRTBlock],
+) -> tuple[list[int], list[int]]:
+    """Merge translated blocks into the current chunk by index.
+
+    Returns (applied_indices, missing_indices) for this merge attempt.
+    """
+
+    orig_by_index = {b.index: b for b in block_group if b.index is not None}
+    fixed_by_index = {b.index: b for b in translated_blocks if b.index is not None}
+
+    common_keys = sorted(orig_by_index.keys() & fixed_by_index.keys())
+    for key in common_keys:
+        ob = orig_by_index[key]
+        fb = fixed_by_index[key]
+
+        fb.start = ob.start
+        fb.end = ob.end
+        ob.lines = fb.lines
+
+    missing = sorted(k for k in orig_by_index.keys() if k not in fixed_by_index)
+    return common_keys, missing
 
 # ─────────────── GPT へ逐次リクエスト ───────────────────────────────────
 for idx, block_group in enumerate(
@@ -137,53 +254,23 @@ for idx, block_group in enumerate(
         {"role": "user",   "content": block_text}
     ]
 
-    # ― リクエスト＋タイムアウト付き指数バックオフリトライ ―
-    rsp, last_err = None, None
-    max_retries = 3
-    timeout_seconds = 60.0
-    for attempt in range(1, max_retries + 1):
-        try:
-            rsp = client.responses.create(
-                model=deployment,
-                input=messages,
-                #temperature=0.3,
-                max_output_tokens=20000,
-                timeout=timeout_seconds,
-            )
-            break        # 成功
-        except (APITimeoutError, APIConnectionError, APIError) as e:
-            last_err = e
-            wait = 2 ** (attempt - 1)
-            print(
-                f"[WARN] chunk {idx}: API error on attempt {attempt}/{max_retries}: {e}",
-                file=sys.stderr,
-            )
-            time.sleep(wait)
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-            wait = 2 ** (attempt - 1)
-            print(
-                f"[WARN] chunk {idx}: unexpected error on attempt {attempt}/{max_retries}: {e}",
-                file=sys.stderr,
-            )
-            time.sleep(wait)
-
-    if rsp is None:      # 3 回とも失敗
-        content = f"[ERROR: {last_err}]"
-        reason  = "exception"
+    # Ollama はローカルでも応答が 60s を超えることがあるため、少し長めをデフォルトにする。
+    # 必要なら環境変数で上書き可能。
+    if args.backend == "ollama":
+        timeout_seconds = float(os.getenv("OLLAMA_TIMEOUT_S", "240") or 240)
     else:
-        # ― レスポンス検証 ―
-        reason = _get(rsp, "status", "unknown")
-        content = extract_response_text(rsp)
+        timeout_seconds = float(os.getenv("AZURE_TIMEOUT_S", "60") or 60)
+    try:
+        content = call_llm(messages, timeout_seconds=timeout_seconds)
+        reason = args.backend
+    except Exception as e:  # noqa: BLE001
+        content = f"[ERROR: {e}]"
+        reason = "exception"
 
-        if content is None:
-            print(f"[WARN] block {idx}: empty response: status={reason}", file=sys.stderr)
-            content = ""
-
-        # ― 念のため、生成された本文から全角の句点「。」を除去してから書き出す ―
-        #   GPT が指示に反して句点を付けてしまった場合でも、ここで落とすことで
-        #   出力 SRT のポリシー（行末に句点を付けない）を守る。
-        content = content.replace("。", "")
+    # ― 念のため、生成された本文から全角の句点「。」を除去してから書き出す ―
+    #   モデルが指示に反して句点を付けてしまった場合でも、ここで落とすことで
+    #   出力 SRT のポリシー（行末に句点を付けない）を守る。
+    content = (content or "").replace("。", "")
 
     # --debug-dump が指定されている場合は、最初のチャンクに対するモデル応答を
     # そのまま標準出力に書き出して終了する。プロンプトとの噛み合わせ調査用。
@@ -215,27 +302,65 @@ for idx, block_group in enumerate(
         print(f"       raw head (first 5 lines): {preview}", file=sys.stderr)
         continue
 
-    # index で対応付けし、タイムスタンプは元のブロックから引き継ぐ。
-    orig_by_index = {b.index: b for b in block_group if b.index is not None}
-    fixed_by_index = {b.index: b for b in fixed_blocks if b.index is not None}
-
-    common_keys = sorted(orig_by_index.keys() & fixed_by_index.keys())
-    if not common_keys:
+    applied, missing = _merge_translated_blocks_into_group(
+        block_group=block_group,
+        translated_blocks=fixed_blocks,
+    )
+    if not applied:
         print(
             f"[WARN] chunk {idx}: no common indices between original and translated; keeping original blocks.",
             file=sys.stderr,
         )
         continue
 
-    # 共通 index だけ本文を差し替えつつ、タイムスタンプは元の値を書き戻す。
-    for key in common_keys:
-        ob = orig_by_index[key]
-        fb = fixed_by_index[key]
+    if missing:
+        print(
+            f"[WARN] chunk {idx}: translation seems truncated; missing {len(missing)} indices (e.g. {missing[:5]}...).",
+            file=sys.stderr,
+        )
+        print(
+            "       Will retry missing blocks only. If this persists, increase OLLAMA_NUM_PREDICT or lower --chunk.",
+            file=sys.stderr,
+        )
 
-        fb.start = ob.start
-        fb.end = ob.end
+        # Automatic continuation: retry translating only the missing indices.
+        # This reduces the chance that a single long response gets cut off.
+        # Keep attempts limited to avoid runaway loops.
+        max_continuations = int(os.getenv("TRANSLATE_MAX_CONTINUATIONS", "2") or 2)
+        for cont in range(1, max_continuations + 1):
+            missing_blocks = [b for b in block_group if b.index in set(missing)]
+            if not missing_blocks:
+                break
 
-        ob.lines = fb.lines
+            retry_text = blocks_to_text(missing_blocks)
+            retry_messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": retry_text},
+            ]
+            try:
+                retry_content = call_llm(retry_messages, timeout_seconds=timeout_seconds)
+            except Exception as e:  # noqa: BLE001
+                print(
+                    f"[WARN] chunk {idx}: continuation {cont}/{max_continuations} failed: {e}",
+                    file=sys.stderr,
+                )
+                break
+
+            retry_content = (retry_content or "").replace("。", "")
+            retry_blocks = parse_srt_blocks(retry_content)
+            if not retry_blocks:
+                print(
+                    f"[WARN] chunk {idx}: continuation {cont}/{max_continuations} returned no parsable SRT; stopping continuations.",
+                    file=sys.stderr,
+                )
+                break
+
+            _, missing = _merge_translated_blocks_into_group(
+                block_group=block_group,
+                translated_blocks=retry_blocks,
+            )
+            if not missing:
+                break
 
     # タイムスタンプを書き戻した後の状態で SRT として妥当かを検証する。
     # ここでは「致命的な構造崩れ」のみチャンク単位でロールバックし、
@@ -281,7 +406,7 @@ for idx, block_group in enumerate(
             for msg in nonfatal_errors[:5]:
                 print(f"    ~ {msg}", file=sys.stderr)
 
-    tqdm.tqdm.write(f"chunk {idx}: finish_reason={reason}")
+    tqdm.tqdm.write(f"chunk {idx}: backend={reason} model={get_model_name_for_log()}")
 
 
 # すべてのブロックのテキストを差し替えたので、まとめて SRT を書き出す。

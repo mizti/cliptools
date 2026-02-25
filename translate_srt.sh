@@ -2,19 +2,24 @@
 set -euo pipefail
 
 show_help() {
-  echo "Usage: $0 -i <input.srt> [-o <output_dir>]"
+  echo "Usage: $0 -i <input.srt> [-o <output_dir>] [--backend ollama|azure] [--chunk <blocks_per_request>]"
   exit 1
 }
 
 #--- 引数パース --------------------------------------------------------------
 INPUT=""
 OUTDIR=""
+BACKEND="${CLIPTOOLS_LLM_BACKEND:-ollama}"
+CHUNK=""
 
-while getopts ":i:o:" opt; do
-  case "$opt" in
-    i) INPUT="$OPTARG" ;;
-    o) OUTDIR="$OPTARG" ;;
-    *) show_help ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -i) INPUT="$2"; shift 2 ;;
+    -o) OUTDIR="$2"; shift 2 ;;
+    --backend) BACKEND="$2"; shift 2 ;;
+    --chunk) CHUNK="$2"; shift 2 ;;
+    -h|--help) show_help ;;
+    *) echo "Unknown option: $1" >&2; show_help ;;
   esac
 done
 
@@ -25,4 +30,8 @@ done
 OUTDIR="${OUTDIR:-$(dirname "$INPUT")}"
 
 #--- Python スクリプトを実行 -------------------------------------------------
-python translate_srt_gpt.py -i "$INPUT" -o "$OUTDIR"
+ARGS=( -i "$INPUT" -o "$OUTDIR" --backend "$BACKEND" )
+if [[ -n "$CHUNK" ]]; then
+  ARGS+=( --chunk "$CHUNK" )
+fi
+python translate_srt_gpt.py "${ARGS[@]}"

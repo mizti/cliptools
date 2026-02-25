@@ -53,6 +53,51 @@ FIX_SPK=""           # -n
 MIN_SPK=""           # -m
 MAX_SPK=""           # -N/-M
 
+# LLM backend (ollama|azure). Default: ollama
+LLM_BACKEND="${CLIPTOOLS_LLM_BACKEND:-ollama}"
+
+# Ollama on-demand
+OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-${OLLAMA_HOST:-http://127.0.0.1:11434}}"
+_OLLAMA_STARTED_BY_ME=0
+_OLLAMA_PID=""
+
+ollama_is_up() {
+  curl -fsS "${OLLAMA_BASE_URL%/}/api/version" >/dev/null 2>&1
+}
+
+start_ollama_if_needed() {
+  if ollama_is_up; then
+    return 0
+  fi
+
+  echo "[info] Ollama not running; starting (ollama serve)..." >&2
+  mkdir -p "${OUTDIR%/}/logs"
+  ollama serve >"${OUTDIR%/}/logs/ollama-serve.log" 2>&1 &
+  _OLLAMA_PID=$!
+  _OLLAMA_STARTED_BY_ME=1
+
+  for _ in $(seq 1 60); do
+    if ollama_is_up; then
+      echo "[info] Ollama is up." >&2
+      return 0
+    fi
+    sleep 0.5
+  done
+
+  echo "[error] Ollama failed to start. See ${OUTDIR%/}/logs/ollama-serve.log" >&2
+  return 1
+}
+
+stop_ollama_if_started_by_me() {
+  if [[ "${_OLLAMA_STARTED_BY_ME}" -eq 1 && -n "${_OLLAMA_PID}" ]]; then
+    echo "[info] Stopping Ollama (pid=${_OLLAMA_PID})..." >&2
+    kill "${_OLLAMA_PID}" 2>/dev/null || true
+    wait "${_OLLAMA_PID}" 2>/dev/null || true
+  fi
+}
+
+trap stop_ollama_if_started_by_me EXIT INT TERM
+
 # ────────────── ヘルプ
 show_help() {
   sed -n '5,40p' "$0"
@@ -66,6 +111,7 @@ while [[ $# -gt 0 ]]; do
     -o|--outdir)OUTDIR="$2";    shift 2 ;;
     -l|--locale)LOCALE="$2";    shift 2 ;;
     --engine)   ENGINE="$2";    shift 2 ;;
+    --llm|--backend) LLM_BACKEND="$2"; shift 2 ;;
     --clip)     START="$2"; END="$3"; shift 3 ;;
     --audio)    AUDIO_ONLY=true;shift ;;
     -n|--spk)   FIX_SPK="$2";   shift 2 ;;
@@ -77,6 +123,11 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
+
+if [[ ! "$LLM_BACKEND" =~ ^(ollama|azure)$ ]]; then
+  echo "Error: --llm/--backend は ollama|azure で指定してください" >&2
+  exit 1
+fi
 
 if [[ -n "$ENGINE" && ! "$ENGINE" =~ ^(azure|whisperx)$ ]]; then
   echo "Error: --engine は azure|whisperx で指定してください" >&2
@@ -238,11 +289,16 @@ shopt -u nullglob
 # 3. 固有名詞補正 (英語 SRT → 英語 SRT fixed)
 ###############################################################################
 echo "▶ 3/4 fix_unique_nouns.py (proper nouns in EN SRT)"
+
+if [[ "$LLM_BACKEND" == "ollama" ]]; then
+  start_ollama_if_needed
+fi
+
 FIXED_SRT_FILES=()
 for srt in "${SRT_FILES[@]}"; do
   # 出力ファイル名は <元ファイル名>_fixed.srt
   fixed_srt="${srt%.srt}_fixed.srt"
-  python fix_unique_nouns.py "$srt" -o "$fixed_srt" || {
+  python fix_unique_nouns.py "$srt" -o "$fixed_srt" --backend "$LLM_BACKEND" || {
     echo "[warn] fix_unique_nouns.py failed for $srt; using original SRT" >&2
     FIXED_SRT_FILES+=("$srt")
     continue
@@ -254,8 +310,13 @@ done
 # 4. 翻訳
 ###############################################################################
 echo "▶ 4/4 translate_srt.sh → *_ja-JP.srt"
+
+if [[ "$LLM_BACKEND" == "ollama" ]]; then
+  start_ollama_if_needed
+fi
+
 for srt in "${FIXED_SRT_FILES[@]}"; do
-  ./translate_srt.sh -i "$srt" -o "$OUTDIR"                     # :contentReference[oaicite:3]{index=3}
+  ./translate_srt.sh -i "$srt" -o "$OUTDIR" --backend "$LLM_BACKEND"                     # :contentReference[oaicite:3]{index=3}
 done
 
 echo "✅ 完了: 出力先 → $OUTDIR"
