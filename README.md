@@ -208,6 +208,7 @@ source .env
 - `--audio`      : 音声のみをダウンロードして処理(Option)
 - `-n` / `-m` / `-N` : 話者数の固定／最小／最大 (Option / デフォルト1)
 - `-j, --from-json` : 既にマージ済みの STT JSON（通常は `azure-stt.json`）から開始（download.sh をスキップし、generate_srt.sh の `--from-json` モードを使用）
+- `--from-srt`   : 既存の英語 SRT から開始（3.固有名詞補正 → 4.翻訳 のみ実行）
 
 
 ---

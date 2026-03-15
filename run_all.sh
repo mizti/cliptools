@@ -16,6 +16,7 @@
 #   -l|--locale    : 字幕生成言語     (既定: en-US   → SpeakerX_en-US.srt)
 #   --engine       : STT エンジン (azure|whisperx) ※省略時は generate_srt.sh のデフォルト
 #   -W|--from-whisper-json : whisper-cli が出力した JSON から開始（内部フォーマットに変換して続行）
+#   --from-srt      : 既存の英語 SRT から開始（3.固有名詞補正 → 4.翻訳 のみ実行）
 #   -n <N>            : 話者数を N に固定               （-m/-N と排他）
 #   -m <MIN>          : 最小話者数
 #   -N/-M <MAX>       : 最大話者数
@@ -44,6 +45,7 @@ MEDIA_FILE=""        # 既存ファイル
 OUTDIR="."
 FROM_JSON=""         # 既存の STT JSON（内部フォーマット: azure-stt.json）から開始
 FROM_WHISPER_JSON="" # 既存の whisper-cli JSON から開始（内部フォーマットに変換して続行）
+FROM_SRT=""          # 既存の英語 SRT から開始（固有名詞補正→翻訳）
 LOCALE="en-US"
 ENGINE=""          # azure|whisperx. 空なら generate_srt.sh 側のデフォルトに任せる
 START="" END=""
@@ -73,6 +75,7 @@ while [[ $# -gt 0 ]]; do
   -N|--max|-M)MAX_SPK="$2";   shift 2 ;;
   -j|--from-json)FROM_JSON="$2"; shift 2 ;;
   -W|--from-whisper-json)FROM_WHISPER_JSON="$2"; shift 2 ;;
+    --from-srt) FROM_SRT="$2"; shift 2 ;;
     -h|--help)  show_help; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
@@ -102,8 +105,11 @@ fi
 if [[ -n $URL && -n $MEDIA_FILE ]]; then
   echo "Error: -u と -f は同時に指定できません" >&2; exit 1
 fi
-if [[ -z $URL && -z $MEDIA_FILE && -z $FROM_JSON && -z $FROM_WHISPER_JSON ]]; then
-  echo "Error: -u か -f か --from-json か --from-whisper-json のいずれかを指定してください" >&2; exit 1
+if [[ -n $FROM_SRT && ( -n $URL || -n $MEDIA_FILE || -n $FROM_JSON || -n $FROM_WHISPER_JSON ) ]]; then
+  echo "Error: --from-srt は -u/-f/--from-json/--from-whisper-json と同時に指定できません" >&2; exit 1
+fi
+if [[ -z $URL && -z $MEDIA_FILE && -z $FROM_JSON && -z $FROM_WHISPER_JSON && -z $FROM_SRT ]]; then
+  echo "Error: -u か -f か --from-json か --from-whisper-json か --from-srt のいずれかを指定してください" >&2; exit 1
 fi
 if [[ -n $FIX_SPK && ( -n $MIN_SPK || -n $MAX_SPK ) ]]; then
   echo "Error: -n は -m/-N と同時に使えません" >&2; exit 1
@@ -113,6 +119,53 @@ fi
 # デフォルトの出力ディレクトリとして扱う。
 if [[ -n $MEDIA_FILE && "$OUTDIR" == "." ]]; then
   OUTDIR=$(dirname "$MEDIA_FILE")
+fi
+
+###############################################################################
+# 3. 固有名詞補正 (英語 SRT → 英語 SRT fixed) から開始するモード
+###############################################################################
+if [[ -n $FROM_SRT ]]; then
+  SRT_FILES=()
+
+  if [[ -d $FROM_SRT ]]; then
+    [[ "$OUTDIR" == "." ]] && OUTDIR="$FROM_SRT"
+    mkdir -p "$OUTDIR"
+    SRT_PATTERN="Speaker*_${LOCALE}.srt"
+    shopt -s nullglob
+    SRT_FILES=("$FROM_SRT"/$SRT_PATTERN)
+    shopt -u nullglob
+    [[ ${#SRT_FILES[@]} -gt 0 ]] || { echo "Error: SRT が見つかりません: $FROM_SRT/$SRT_PATTERN" >&2; exit 3; }
+  else
+    [[ -f $FROM_SRT ]] || { echo "Error: ファイルがありません: $FROM_SRT" >&2; exit 2; }
+    if [[ "$FROM_SRT" == *_fixed.srt ]]; then
+      echo "Error: --from-srt には *_fixed.srt ではなく元の英語SRTを指定してください: $FROM_SRT" >&2
+      exit 2
+    fi
+    [[ "$OUTDIR" == "." ]] && OUTDIR=$(dirname "$FROM_SRT")
+    mkdir -p "$OUTDIR"
+    SRT_FILES=("$FROM_SRT")
+  fi
+
+  echo "▶ 3/4 fix_unique_nouns.py (proper nouns in EN SRT)"
+  FIXED_SRT_FILES=()
+  for srt in "${SRT_FILES[@]}"; do
+    base=$(basename "$srt" .srt)
+    fixed_srt="${OUTDIR%/}/${base}_fixed.srt"
+    python fix_unique_nouns.py "$srt" -o "$fixed_srt" || {
+      echo "[warn] fix_unique_nouns.py failed for $srt; using original SRT" >&2
+      FIXED_SRT_FILES+=("$srt")
+      continue
+    }
+    FIXED_SRT_FILES+=("$fixed_srt")
+  done
+
+  echo "▶ 4/4 translate_srt.sh → *_ja-JP.srt"
+  for srt in "${FIXED_SRT_FILES[@]}"; do
+    ./translate_srt.sh -i "$srt" -o "$OUTDIR"
+  done
+
+  echo "✅ 完了: 出力先 → $OUTDIR"
+  exit 0
 fi
 
 ###############################################################################
