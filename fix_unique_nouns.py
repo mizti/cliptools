@@ -15,6 +15,36 @@ B_BEFORE = "\033[38;5;39m"    # bright blue-ish (before)
 BOLD = "\033[1m"
 RESET = "\033[0m"
 
+
+def _env_truthy(key: str) -> bool:
+    v = os.getenv(key, "").strip().lower()
+    return v not in {"", "0", "false", "no", "off"}
+
+
+def _truncate_for_log(text: str, limit: int) -> str:
+    if limit <= 0:
+        return text
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    return head + f"\n... (truncated, total_chars={len(text)})"
+
+
+def _debug_print(debug: bool, message: str, *, log_path: str | None = None) -> None:
+    if not debug:
+        return
+    if log_path:
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(message)
+                if not message.endswith("\n"):
+                    f.write("\n")
+        except OSError as e:
+            print(f"[fix_proper_nouns_gpt][debug] failed to write log to {log_path}: {e}", file=sys.stderr)
+            print(message, file=sys.stderr)
+    else:
+        print(message, file=sys.stderr)
+
 def load_env(key: str, default: str | None = None) -> str:
     value = os.getenv(key, default)
     if value is None:
@@ -48,6 +78,14 @@ def call_model(
     *,
     timeout_seconds: float = 60.0,
     max_retries: int = 3,
+    debug: bool = False,
+    debug_label: str = "",
+    debug_log_path: str | None = None,
+    debug_max_chars: int = 8000,
+    debug_dump_response_json: bool = False,
+    debug_response_json_max_chars: int = 20000,
+    reasoning_effort: str | None = None,
+    verbosity: str | None = None,
 ) -> str:
     """Call the model for a given SRT chunk with timeout & retry.
 
@@ -63,6 +101,25 @@ def call_model(
     user_content_parts.append(srt_text)
     user_content = "\n".join(user_content_parts)
 
+    if debug:
+        label = f" {debug_label}" if debug_label else ""
+        _debug_print(
+            True,
+            f"\n========== [fix_proper_nouns_gpt][debug]{label} SYSTEM PROMPT BEGIN =========="
+            f"\n{_truncate_for_log(system_prompt, debug_max_chars)}"
+            f"\n========== [fix_proper_nouns_gpt][debug]{label} SYSTEM PROMPT END =========="
+            f"\n",
+            log_path=debug_log_path,
+        )
+        _debug_print(
+            True,
+            f"\n========== [fix_proper_nouns_gpt][debug]{label} USER TEXT BEGIN =========="
+            f"\n{_truncate_for_log(user_content, debug_max_chars)}"
+            f"\n========== [fix_proper_nouns_gpt][debug]{label} USER TEXT END =========="
+            f"\n",
+            log_path=debug_log_path,
+        )
+
     last_err: Exception | None = None
     for attempt in range(1, max_retries + 1):
         try:
@@ -70,13 +127,74 @@ def call_model(
                 model=deployment,
                 max_completion_tokens=4000,
                 timeout=timeout_seconds,
+                reasoning_effort=reasoning_effort,
+                verbosity=verbosity,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},
                 ],
             )
             choice = resp.choices[0]
-            content = choice.message.content or ""
+            finish_reason = getattr(choice, "finish_reason", None)
+            message = choice.message
+            content = (message.content or "") if message is not None else ""
+            refusal = getattr(message, "refusal", None) if message is not None else None
+            tool_calls = getattr(message, "tool_calls", None) if message is not None else None
+
+            if debug:
+                label = f" {debug_label}" if debug_label else ""
+                _debug_print(
+                    True,
+                    "[fix_proper_nouns_gpt][debug]"
+                    f"{label} finish_reason={finish_reason} content_len={len(content)} "
+                    f"refusal={'yes' if refusal else 'no'} tool_calls={len(tool_calls) if tool_calls else 0}",
+                    log_path=debug_log_path,
+                )
+                if refusal:
+                    _debug_print(
+                        True,
+                        f"\n========== [fix_proper_nouns_gpt][debug]{label} REFUSAL BEGIN =========="
+                        f"\n{_truncate_for_log(str(refusal), debug_max_chars)}"
+                        f"\n========== [fix_proper_nouns_gpt][debug]{label} REFUSAL END =========="
+                        f"\n",
+                        log_path=debug_log_path,
+                    )
+
+                prompt_filter = getattr(resp, "prompt_filter_results", None)
+                content_filter = getattr(resp, "content_filter_results", None)
+                if prompt_filter is not None or content_filter is not None:
+                    _debug_print(
+                        True,
+                        "[fix_proper_nouns_gpt][debug]"
+                        f"{label} prompt_filter_results_present={prompt_filter is not None} "
+                        f"content_filter_results_present={content_filter is not None}",
+                        log_path=debug_log_path,
+                    )
+
+                if debug_dump_response_json:
+                    try:
+                        raw_json = resp.model_dump_json(indent=2, ensure_ascii=False)
+                    except Exception:  # noqa: BLE001
+                        raw_json = str(resp)
+                    _debug_print(
+                        True,
+                        f"\n========== [fix_proper_nouns_gpt][debug]{label} RESPONSE JSON BEGIN =========="
+                        f"\n{_truncate_for_log(raw_json, debug_response_json_max_chars)}"
+                        f"\n========== [fix_proper_nouns_gpt][debug]{label} RESPONSE JSON END =========="
+                        f"\n",
+                        log_path=debug_log_path,
+                    )
+
+            if debug:
+                label = f" {debug_label}" if debug_label else ""
+                _debug_print(
+                    True,
+                    f"\n========== [fix_proper_nouns_gpt][debug]{label} RAW RESPONSE BEGIN =========="
+                    f"\n{_truncate_for_log(content, debug_max_chars)}"
+                    f"\n========== [fix_proper_nouns_gpt][debug]{label} RAW RESPONSE END =========="
+                    f"\n",
+                    log_path=debug_log_path,
+                )
             return content
         except (APITimeoutError, APIConnectionError, APIError) as e:  # noqa: PERF203
             last_err = e
@@ -165,6 +283,33 @@ def main() -> None:
     system_prompt = prompt_path.read_text(encoding="utf-8")
     srt_text = input_path.read_text(encoding="utf-8")
 
+    debug = _env_truthy("FIX_UNIQUE_NOUNS_DEBUG")
+    debug_log_path = os.getenv("FIX_UNIQUE_NOUNS_DEBUG_PATH")
+    try:
+        debug_max_chars = int(os.getenv("FIX_UNIQUE_NOUNS_DEBUG_MAX_CHARS", "8000"))
+    except ValueError:
+        debug_max_chars = 8000
+
+    debug_dump_response_json = _env_truthy("FIX_UNIQUE_NOUNS_DEBUG_DUMP_RESPONSE_JSON")
+    try:
+        debug_response_json_max_chars = int(os.getenv("FIX_UNIQUE_NOUNS_DEBUG_RESPONSE_JSON_MAX_CHARS", "20000"))
+    except ValueError:
+        debug_response_json_max_chars = 20000
+
+    if debug:
+        where = debug_log_path or "stderr"
+        print(f"[fix_proper_nouns_gpt][debug] enabled (log={where}, max_chars={debug_max_chars})", file=sys.stderr)
+
+    # GPT-5 系の一部デプロイでは、completionトークンが reasoning に全振りされて
+    # content が空で返るケースがあるため、デフォルトで推論を抑制する。
+    reasoning_effort = os.getenv("FIX_UNIQUE_NOUNS_REASONING_EFFORT", "low").strip() or None
+    verbosity = os.getenv("FIX_UNIQUE_NOUNS_VERBOSITY", "low").strip() or None
+    if debug:
+        print(
+            f"[fix_proper_nouns_gpt][debug] reasoning_effort={reasoning_effort} verbosity={verbosity}",
+            file=sys.stderr,
+        )
+
     # If there is no dictionary, we can choose to skip processing.
     if not dictionary_text.strip():
         print(f"[fix_proper_nouns_gpt] Dictionary {dict_path} is empty; copying input to output.")
@@ -205,6 +350,14 @@ def main() -> None:
                 system_prompt=system_prompt,
                 dictionary_text=dictionary_text,
                 srt_text=chunk_srt,
+                debug=debug,
+                debug_label=f"chunk {idx}",
+                debug_log_path=debug_log_path,
+                debug_max_chars=debug_max_chars,
+                debug_dump_response_json=debug_dump_response_json,
+                debug_response_json_max_chars=debug_response_json_max_chars,
+                reasoning_effort=reasoning_effort,
+                verbosity=verbosity,
             )
         except Exception as e:  # noqa: BLE001
             print(

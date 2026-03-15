@@ -83,3 +83,7 @@ Return **only** the corrected SRT text, with exactly the same structure as the i
 - Only the text lines may differ where proper nouns were corrected.
 
 Do not add explanations, comments, or any extra text outside the SRT content.
+
+---
+Also, due to processing limitations, the current speech-to-subtitle engine inserts an unusually large number of symbols such as “..” and “...”
+These interfere with readability, so please remove them from the text separately from the above instructions.

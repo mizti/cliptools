@@ -17,12 +17,12 @@ _NLP = spacy.load("en_core_web_sm")
 # These are library defaults; tweak in this module when experimenting.
 
 # Minimum preferred characters per segment after intra-phrase merging.
-PREFERRED_MIN_CHARS: int = 6
+PREFERRED_MIN_CHARS: int = 4
 
 # Soft upper bound for characters per segment. When a segment exceeds this
 # length, we try to split it at a reasonable boundary (comma, conjunction,
 # etc.) to keep subtitles readable.
-PREFERRED_MAX_CHARS: int = 75
+PREFERRED_MAX_CHARS: int = 60
 
 
 @dataclass
