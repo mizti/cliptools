@@ -18,6 +18,7 @@ def ollama_chat(
     model: str,
     messages: list[dict[str, Any]],
     options: dict[str, Any] | None = None,
+    think: bool | None = None,
     timeout_s: float = 120.0,
 ) -> OllamaChatResult:
     url = base_url.rstrip("/") + "/api/chat"
@@ -27,6 +28,11 @@ def ollama_chat(
         "messages": messages,
         "stream": False,
     }
+    # Some models support "thinking". If enabled, the API may separate the
+    # model's thinking from the final content (message.thinking vs message.content),
+    # and thinking can add large latency. Callers can explicitly disable it.
+    if think is not None:
+        payload["think"] = think
     if options:
         payload["options"] = options
 

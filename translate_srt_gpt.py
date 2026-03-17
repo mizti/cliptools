@@ -111,7 +111,7 @@ def call_llm(messages: list[dict[str, str]], *, timeout_seconds: float) -> str:
 
     if backend == 'ollama':
         base_url = os.getenv('OLLAMA_BASE_URL') or os.getenv('OLLAMA_HOST') or 'http://127.0.0.1:11434'
-        model = os.getenv('OLLAMA_MODEL_TRANSLATE') or os.getenv('OLLAMA_MODEL') or 'qwen3:8b'
+        model = os.getenv('OLLAMA_MODEL_TRANSLATE') or os.getenv('OLLAMA_MODEL') or 'qwen3.5:9b'
         # qwen3 系はチャンクの末尾が途切れて「一部ブロックだけ英語のまま」になりやすいので、
         # デフォルトは少し大きめにしておく。
         num_predict = int(os.getenv('OLLAMA_NUM_PREDICT', '8000') or 8000)
@@ -128,6 +128,7 @@ def call_llm(messages: list[dict[str, str]], *, timeout_seconds: float) -> str:
                         'temperature': 0,
                         'num_predict': num_predict,
                     },
+                    think=False,
                     timeout_s=timeout_seconds,
                 )
                 return result.content
@@ -149,7 +150,7 @@ def call_llm(messages: list[dict[str, str]], *, timeout_seconds: float) -> str:
 def get_model_name_for_log() -> str:
     if args.backend == "azure":
         return os.getenv("DEPLOYMENT_NAME", "gpt-5-chat")
-    return os.getenv("OLLAMA_MODEL_TRANSLATE") or os.getenv("OLLAMA_MODEL") or "qwen3:8b"
+    return os.getenv("OLLAMA_MODEL_TRANSLATE") or os.getenv("OLLAMA_MODEL") or "qwen3.5:9b"
 
 # ─────────────── システムプロンプト読み込み ─────────────────────────────────
 prompt_path = Path("settings/system_prompt.txt")
@@ -165,6 +166,11 @@ blocks: List[SRTBlock] = parse_srt_blocks(src_text)
 if not blocks:
     print("[ERROR] No parsable SRT blocks in input; aborting.", file=sys.stderr)
     sys.exit(1)
+
+print(
+    f"[translate_srt_gpt] backend={args.backend} model={get_model_name_for_log()}",
+    file=sys.stderr,
+)
 
 
 def chunk_blocks(seq: List[SRTBlock], size: int) -> List[List[SRTBlock]]:

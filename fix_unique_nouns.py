@@ -95,7 +95,11 @@ def call_model(
 
             if backend == "ollama":
                 base_url = os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434"
-                model = os.getenv("OLLAMA_MODEL_FIX") or os.getenv("OLLAMA_MODEL") or "qwen3:8b"
+                model = os.getenv("OLLAMA_MODEL_FIX") or os.getenv("OLLAMA_MODEL") or "qwen3.5:9b"
+
+                # Large SRT chunks can take a long time to generate. Also, if num_predict
+                # is too small, the model may truncate output and break SRT parsing.
+                num_predict = int(os.getenv("OLLAMA_NUM_PREDICT_FIX", "8000") or 8000)
 
                 result = ollama_chat(
                     base_url=base_url,
@@ -104,7 +108,8 @@ def call_model(
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_content},
                     ],
-                    options={"temperature": 0},
+                    options={"temperature": 0, "num_predict": num_predict},
+                    think=False,
                     timeout_s=timeout_seconds,
                 )
                 return result.content
@@ -224,7 +229,12 @@ def main() -> None:
         output_path.write_text(srt_text, encoding="utf-8")
         return
 
-    blocks_per_chunk = 100
+    # Ollama (local) can be significantly slower on long outputs; use a smaller
+    # default chunk size to avoid timeouts. Users can override via env.
+    if args.backend == "ollama":
+        blocks_per_chunk = int(os.getenv("FIX_NOUNS_BLOCKS_PER_CHUNK", "40") or 40)
+    else:
+        blocks_per_chunk = int(os.getenv("FIX_NOUNS_BLOCKS_PER_CHUNK", "100") or 100)
     print(
         f"[fix_proper_nouns_gpt] Processing {len(all_blocks)} blocks in chunks of {blocks_per_chunk}...",
         file=sys.stderr,
@@ -234,7 +244,7 @@ def main() -> None:
         chunk_srt = blocks_to_text(block_group)
 
         if args.backend == "ollama":
-            model_name = os.getenv("OLLAMA_MODEL_FIX") or os.getenv("OLLAMA_MODEL") or "qwen3:8b"
+            model_name = os.getenv("OLLAMA_MODEL_FIX") or os.getenv("OLLAMA_MODEL") or "qwen3.5:9b"
         else:
             model_name = args.deployment
 

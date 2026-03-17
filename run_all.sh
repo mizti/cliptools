@@ -38,6 +38,73 @@
 ###############################################################################
 set -Eeuo pipefail
 
+###############################################################################
+# Ollama server guard (for local LLM steps)
+#
+# fix_unique_nouns.py / translate_srt_gpt.py call Ollama via HTTP; they do NOT
+# start the server themselves. When CLIPTOOLS_LLM_BACKEND is ollama (default),
+# make sure the server is reachable before running those steps.
+###############################################################################
+
+normalize_ollama_base_url() {
+  local raw="${1:-}"
+  if [[ -z "$raw" ]]; then
+    echo "http://127.0.0.1:11434"
+    return 0
+  fi
+  # Some setups provide host:port without scheme.
+  if [[ "$raw" =~ ^https?:// ]]; then
+    echo "$raw"
+  else
+    echo "http://$raw"
+  fi
+}
+
+ollama_healthcheck() {
+  local base_url
+  base_url=$(normalize_ollama_base_url "${OLLAMA_BASE_URL:-${OLLAMA_HOST:-}}")
+  command -v curl >/dev/null 2>&1 || return 1
+  curl -sS --max-time 2 "${base_url%/}/api/version" >/dev/null 2>&1
+}
+
+ensure_ollama_server() {
+  # Respect backend selection (default is ollama).
+  local backend="${CLIPTOOLS_LLM_BACKEND:-ollama}"
+  if [[ "$backend" != "ollama" ]]; then
+    return 0
+  fi
+
+  if ollama_healthcheck; then
+    return 0
+  fi
+
+  echo "[run_all] Ollama server is not reachable; starting it..." >&2
+
+  # Prefer Homebrew service on macOS if available (stable background daemon).
+  if command -v brew >/dev/null 2>&1; then
+    brew services start ollama >/dev/null 2>&1 || true
+  fi
+
+  # Fallback: start a local server in background.
+  if ! ollama_healthcheck; then
+    if command -v ollama >/dev/null 2>&1; then
+      # Avoid noisy logs; user can run OLLAMA_DEBUG=INFO themselves if needed.
+      (ollama serve >/dev/null 2>&1 &) || true
+    fi
+  fi
+
+  # Wait briefly for server to come up.
+  for _ in 1 2 3 4 5; do
+    if ollama_healthcheck; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "[run_all] Error: failed to start/reach Ollama server. Try: 'brew services restart ollama' or 'ollama serve'" >&2
+  exit 10
+}
+
 # ────────────── デフォルト
 URL=""               # YouTube URL
 MEDIA_FILE=""        # 既存ファイル
@@ -284,6 +351,9 @@ shopt -s nullglob
 SRT_FILES=("$OUTDIR"/$SRT_PATTERN)
 shopt -u nullglob
 [[ ${#SRT_FILES[@]} -gt 0 ]] || { echo "Error: SRT が見つかりません"; exit 3; }
+
+# Local LLM steps (proper noun fixing + translation) require Ollama when backend=ollama.
+ensure_ollama_server
 
 ###############################################################################
 # 3. 固有名詞補正 (英語 SRT → 英語 SRT fixed)

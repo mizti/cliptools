@@ -19,7 +19,7 @@ YouTube 配信などの長尺動画やローカルの動画ファイルから日
 
 - WhisperX または Azure Speech の **word-level timestamp** 相当を利用しつつ、SpaCy で自然な文単位に分割した SRT を生成
 - 固有名詞用のカスタム辞書を使って、配信者名・作品名などの表記揺れを統一
-- デフォルトでは **ローカル Ollama（qwen3:8b）** で、SRT 構造を壊さずに固有名詞補正／日本語翻訳
+- デフォルトでは **ローカル Ollama（qwen3.5:9b）** で、SRT 構造を壊さずに固有名詞補正／日本語翻訳
 	- 必要に応じて **Azure OpenAI** を LLM バックエンドに切り替え可能
 
 基本的な利用イメージ:
@@ -60,7 +60,7 @@ brew install pyenv deno
 ### 2-1-1. Ollama（デフォルト LLM）を使うためのセットアップ
 
 このリポジトリでは、固有名詞補正（`fix_unique_nouns.py`）と翻訳（`translate_srt.sh` / `translate_srt_gpt.py`）のデフォルト LLM として
-**Ollama + qwen3:8b** を使います。
+**Ollama + qwen3.5:9b** を使います。
 
 macOS (Homebrew) 例:
 
@@ -74,10 +74,10 @@ Ollama を起動（すでに起動済みなら不要）:
 ollama serve
 ```
 
-qwen3:8b を取得:
+qwen3.5:9b を取得:
 
 ```bash
-ollama pull qwen3:8b
+ollama pull qwen3.5:9b
 ```
 
 spaCy ベースの文分割を使うため、英語モデルも追加でインストールします。
@@ -154,8 +154,8 @@ export CLIPTOOLS_LLM_BACKEND=ollama
 # 省略時のデフォルト: http://127.0.0.1:11434
 export OLLAMA_BASE_URL=http://127.0.0.1:11434
 
-# 省略時のデフォルト: qwen3:8b
-export OLLAMA_MODEL=qwen3:8b
+# 省略時のデフォルト: qwen3.5:9b
+export OLLAMA_MODEL=qwen3.5:9b
 
 # ====== Azure Speech / Storage ======
 
@@ -217,8 +217,8 @@ source .env
 
 1. `download.sh` で YouTube から動画／音声を取得（または既存ファイルをそのまま利用）
 2. `generate_srt.sh` で STT → 文単位 SRT 生成（デフォルト: WhisperX / `--engine azure` で Azure Speech STT）
-3. `fix_unique_nouns.py` で英語 SRT の固有名詞を補正（デフォルト: Ollama + qwen3:8b）
-4. `translate_srt.sh` で日本語 SRT を生成（デフォルト: Ollama + qwen3:8b）
+3. `fix_unique_nouns.py` で英語 SRT の固有名詞を補正（デフォルト: Ollama + qwen3.5:9b）
+4. `translate_srt.sh` で日本語 SRT を生成（デフォルト: Ollama + qwen3.5:9b）
 
 基本的な使い方:
 
