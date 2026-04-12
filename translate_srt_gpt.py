@@ -10,6 +10,8 @@ import os
 import sys
 import argparse
 import time
+import random
+import signal
 from pathlib import Path
 from typing import List
 
@@ -24,7 +26,41 @@ from utils.srt_parser import SRTBlock, blocks_to_text, parse_srt_blocks, validat
 parser = argparse.ArgumentParser()
 parser.add_argument('-i', '--input',      required=True, help='SRT file to translate')
 parser.add_argument('-o', '--output_dir', required=True, help='Directory to write result')
-parser.add_argument('--chunk', type=int, default=50, help='Lines per request (default: 50)')
+parser.add_argument(
+    '--chunk',
+    dest='blocks_per_request',
+    type=int,
+    default=int(os.getenv('TRANSLATE_BLOCKS_PER_REQUEST', '40') or 40),
+    help='SRT blocks per request (default: 40; env: TRANSLATE_BLOCKS_PER_REQUEST)'
+)
+parser.add_argument(
+    '--timeout',
+    type=float,
+    default=float(os.getenv('TRANSLATE_TIMEOUT_SECONDS', '180') or 180),
+    help='Request timeout seconds (default: 180; env: TRANSLATE_TIMEOUT_SECONDS)'
+)
+parser.add_argument(
+    '--retries',
+    type=int,
+    default=int(os.getenv('TRANSLATE_MAX_RETRIES', '3') or 3),
+    help='Max retries per chunk (default: 3; env: TRANSLATE_MAX_RETRIES)'
+)
+parser.add_argument(
+    '--max-output-tokens',
+    type=int,
+    default=int(os.getenv('TRANSLATE_MAX_OUTPUT_TOKENS', '20000') or 20000),
+    help='max_output_tokens for the model (default: 20000; env: TRANSLATE_MAX_OUTPUT_TOKENS)'
+)
+parser.add_argument(
+    '--debug',
+    action='store_true',
+    help='Enable verbose debug logs to stderr (env: TRANSLATE_DEBUG=1)'
+)
+parser.add_argument(
+    '--debug-save-input',
+    action='store_true',
+    help='Save each chunk input SRT into debug dir (env: TRANSLATE_DEBUG_SAVE_INPUT=1)'
+)
 parser.add_argument('--debug-dump', action='store_true', help='Dump raw model response for inspection (one chunk only)')
 args = parser.parse_args()
 
@@ -59,6 +95,14 @@ client = AzureOpenAI(
     api_version   =os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview"),
 )
 deployment = os.getenv("DEPLOYMENT_NAME", "gpt-5-chat")
+
+debug_enabled = bool(args.debug) or bool(int(os.getenv('TRANSLATE_DEBUG', '0') or 0))
+save_debug_input = bool(args.debug_save_input) or bool(int(os.getenv('TRANSLATE_DEBUG_SAVE_INPUT', '0') or 0))
+
+
+def debug_log(msg: str) -> None:
+    if debug_enabled:
+        print(f"[DEBUG] {msg}", file=sys.stderr)
 
 # ─────────────── システムプロンプト読み込み ─────────────────────────────────
 prompt_path = Path("settings/system_prompt.txt")
@@ -114,7 +158,18 @@ def extract_response_text(rsp) -> str | None:
     return None
 
 
+def _write_current_output() -> None:
+    final_srt = blocks_to_text(blocks)
+    dst_path.write_text(final_srt, encoding="utf-8")
+
+
 BLOCKS_PER_REQUEST = 40
+
+# Prefer CLI/env setting over hard-coded default
+try:
+    BLOCKS_PER_REQUEST = max(1, int(args.blocks_per_request))
+except Exception:  # noqa: BLE001
+    BLOCKS_PER_REQUEST = 40
 
 # デバッグ: 問題のクリップで GPT 応答が SRT としてパースできない原因を調べるため、
 # 先頭いくつかのチャンクについてはモデル応答の生テキストと、パース/検証エラーを
@@ -124,6 +179,48 @@ DEBUG_LOG_DIR = os.getenv("TRANSLATE_DEBUG_DIR", "clips/_translate_debug")
 
 total_chunks = (len(blocks) + BLOCKS_PER_REQUEST - 1) // BLOCKS_PER_REQUEST
 
+debug_log(
+    "translate_srt_gpt.py config: "
+    f"endpoint={os.getenv('ENDPOINT_URL','')!r} "
+    f"api_version={os.getenv('AZURE_OPENAI_API_VERSION','2025-04-01-preview')!r} "
+    f"deployment={deployment!r} "
+    f"blocks={len(blocks)} chunks={total_chunks} blocks_per_request={BLOCKS_PER_REQUEST} "
+    f"timeout={args.timeout}s retries={args.retries} max_output_tokens={args.max_output_tokens}"
+)
+
+
+def _safe_mkdir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
+
+
+def _exception_details(e: BaseException) -> str:
+    status = getattr(e, 'status_code', None)
+    request_id = getattr(e, 'request_id', None)
+    code = getattr(e, 'code', None)
+    typ = type(e).__name__
+    parts = [f"type={typ}"]
+    if status is not None:
+        parts.append(f"status_code={status}")
+    if code is not None:
+        parts.append(f"code={code}")
+    if request_id is not None:
+        parts.append(f"request_id={request_id}")
+    parts.append(f"message={e}")
+    return " ".join(parts)
+
+
+def _sigint_handler(signum, frame):  # noqa: ANN001
+    # Ctrl+C で中断した場合でも、途中結果を保存して調査しやすくする。
+    try:
+        _write_current_output()
+        print(f"\n[INFO] Interrupted. Partial output saved → {dst_path.resolve()}", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001
+        print(f"\n[WARN] Interrupted, but failed to save partial output: {e}", file=sys.stderr)
+    signal.default_int_handler(signum, frame)
+
+
+signal.signal(signal.SIGINT, _sigint_handler)
+
 # ─────────────── GPT へ逐次リクエスト ───────────────────────────────────
 for idx, block_group in enumerate(
     tqdm.tqdm(chunk_blocks(blocks, BLOCKS_PER_REQUEST), desc="Translating"), start=1
@@ -132,6 +229,23 @@ for idx, block_group in enumerate(
     # モデルに渡すテキストの前後に余計な空行を付けない。
     # 各チャンクは SRT として構造を保った部分文字列になる。
     block_text = blocks_to_text(block_group)
+    if debug_enabled:
+        first_i = next((b.index for b in block_group if b.index is not None), None)
+        last_i = next((b.index for b in reversed(block_group) if b.index is not None), None)
+        debug_log(
+            f"chunk {idx}/{total_chunks}: blocks={len(block_group)} index_range={first_i}-{last_i} "
+            f"chars={len(block_text)} lines={len(block_text.splitlines())}"
+        )
+
+    if (save_debug_input or (DEBUG_LOG_RAW_CHUNKS and idx <= DEBUG_LOG_RAW_CHUNKS)):
+        try:
+            log_dir = Path(DEBUG_LOG_DIR)
+            _safe_mkdir(log_dir)
+            in_path = log_dir / f"chunk_{idx:03d}_input.srt"
+            in_path.write_text(block_text, encoding="utf-8")
+        except Exception as e:  # noqa: BLE001
+            print(f"[WARN] chunk {idx}: failed to write debug input: {e}", file=sys.stderr)
+
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": block_text}
@@ -139,31 +253,36 @@ for idx, block_group in enumerate(
 
     # ― リクエスト＋タイムアウト付き指数バックオフリトライ ―
     rsp, last_err = None, None
-    max_retries = 3
-    timeout_seconds = 60.0
+    max_retries = max(1, int(args.retries))
+    timeout_seconds = float(args.timeout)
+    max_output_tokens = int(args.max_output_tokens)
     for attempt in range(1, max_retries + 1):
         try:
+            t0 = time.time()
             rsp = client.responses.create(
                 model=deployment,
                 input=messages,
                 #temperature=0.3,
-                max_output_tokens=20000,
+                max_output_tokens=max_output_tokens,
                 timeout=timeout_seconds,
             )
+            dt = time.time() - t0
+            debug_log(f"chunk {idx}/{total_chunks}: request ok attempt={attempt} elapsed={dt:.1f}s")
             break        # 成功
         except (APITimeoutError, APIConnectionError, APIError) as e:
             last_err = e
-            wait = 2 ** (attempt - 1)
+            wait = (2 ** (attempt - 1)) + random.random()
             print(
-                f"[WARN] chunk {idx}: API error on attempt {attempt}/{max_retries}: {e}",
+                f"[WARN] chunk {idx}/{total_chunks}: API error on attempt {attempt}/{max_retries} "
+                f"(timeout={timeout_seconds}s) {_exception_details(e)}",
                 file=sys.stderr,
             )
             time.sleep(wait)
         except Exception as e:  # noqa: BLE001
             last_err = e
-            wait = 2 ** (attempt - 1)
+            wait = (2 ** (attempt - 1)) + random.random()
             print(
-                f"[WARN] chunk {idx}: unexpected error on attempt {attempt}/{max_retries}: {e}",
+                f"[WARN] chunk {idx}/{total_chunks}: unexpected error on attempt {attempt}/{max_retries}: {e}",
                 file=sys.stderr,
             )
             time.sleep(wait)
@@ -285,7 +404,6 @@ for idx, block_group in enumerate(
 
 
 # すべてのブロックのテキストを差し替えたので、まとめて SRT を書き出す。
-final_srt = blocks_to_text(blocks)
-dst_path.write_text(final_srt, encoding="utf-8")
+_write_current_output()
 print(f"\n✅ Completed! → {dst_path.resolve()}")
 
