@@ -45,6 +45,22 @@ def _debug_print(debug: bool, message: str, *, log_path: str | None = None) -> N
     else:
         print(message, file=sys.stderr)
 
+
+def _exception_details(e: BaseException) -> str:
+    status = getattr(e, "status_code", None)
+    request_id = getattr(e, "request_id", None)
+    code = getattr(e, "code", None)
+    typ = type(e).__name__
+    parts = [f"type={typ}"]
+    if status is not None:
+        parts.append(f"status_code={status}")
+    if code is not None:
+        parts.append(f"code={code}")
+    if request_id is not None:
+        parts.append(f"request_id={request_id}")
+    parts.append(f"message={e}")
+    return " ".join(parts)
+
 def load_env(key: str, default: str | None = None) -> str:
     value = os.getenv(key, default)
     if value is None:
@@ -61,7 +77,7 @@ def read_dictionary(dict_path: Path) -> str:
 def build_client() -> AzureOpenAI:
     endpoint = load_env("ENDPOINT_URL")
     api_key = load_env("AZURE_OPENAI_API_KEY")
-    api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
+    api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview")
     return AzureOpenAI(
         azure_endpoint=endpoint,
         api_key=api_key,
@@ -76,7 +92,8 @@ def call_model(
     dictionary_text: str,
     srt_text: str,
     *,
-    timeout_seconds: float = 60.0,
+    timeout_seconds: float = 180.0,
+    max_completion_tokens: int = 40000,
     max_retries: int = 3,
     debug: bool = False,
     debug_label: str = "",
@@ -125,7 +142,7 @@ def call_model(
         try:
             resp = client.chat.completions.create(
                 model=deployment,
-                max_completion_tokens=4000,
+                max_completion_tokens=max_completion_tokens,
                 timeout=timeout_seconds,
                 reasoning_effort=reasoning_effort,
                 verbosity=verbosity,
@@ -199,13 +216,13 @@ def call_model(
         except (APITimeoutError, APIConnectionError, APIError) as e:  # noqa: PERF203
             last_err = e
             print(
-                f"[fix_proper_nouns_gpt] API error on attempt {attempt}/{max_retries}: {e}",
+                f"[fix_proper_nouns_gpt] API error on attempt {attempt}/{max_retries}: {_exception_details(e)}",
                 file=sys.stderr,
             )
         except Exception as e:  # noqa: BLE001
             last_err = e
             print(
-                f"[fix_proper_nouns_gpt] Unexpected error on attempt {attempt}/{max_retries}: {e}",
+                f"[fix_proper_nouns_gpt] Unexpected error on attempt {attempt}/{max_retries}: {_exception_details(e)}",
                 file=sys.stderr,
             )
 
@@ -259,6 +276,43 @@ def main() -> None:
         default=os.getenv("DEPLOYMENT_NAME", "gpt-5.1-chat"),
         help="Azure OpenAI deployment name to use",
     )
+    parser.add_argument(
+        "--timeout",
+        dest="timeout_seconds",
+        type=float,
+        default=float(os.getenv("FIX_UNIQUE_NOUNS_TIMEOUT_SECONDS", "180") or 180),
+        help="Request timeout seconds (default: 180; env: FIX_UNIQUE_NOUNS_TIMEOUT_SECONDS)",
+    )
+    parser.add_argument(
+        "--blocks-per-chunk",
+        dest="blocks_per_chunk",
+        type=int,
+        default=int(os.getenv("FIX_UNIQUE_NOUNS_BLOCKS_PER_CHUNK", "100") or 100),
+        help="SRT blocks per request (default: 100; env: FIX_UNIQUE_NOUNS_BLOCKS_PER_CHUNK)",
+    )
+    parser.add_argument(
+        "--max-completion-tokens",
+        dest="max_completion_tokens",
+        type=int,
+        default=int(os.getenv("FIX_UNIQUE_NOUNS_MAX_COMPLETION_TOKENS", "40000") or 40000),
+        help="max_completion_tokens (default: 4000; env: FIX_UNIQUE_NOUNS_MAX_COMPLETION_TOKENS)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logs (also via env: FIX_UNIQUE_NOUNS_DEBUG=1)",
+    )
+    parser.add_argument(
+        "--debug-log",
+        dest="debug_log_path_cli",
+        default="",
+        help="Debug log file path (env: FIX_UNIQUE_NOUNS_DEBUG_PATH)",
+    )
+    parser.add_argument(
+        "--debug-dump-response-json",
+        action="store_true",
+        help="Dump raw response JSON (also via env: FIX_UNIQUE_NOUNS_DEBUG_DUMP_RESPONSE_JSON=1)",
+    )
 
     args = parser.parse_args()
 
@@ -283,14 +337,14 @@ def main() -> None:
     system_prompt = prompt_path.read_text(encoding="utf-8")
     srt_text = input_path.read_text(encoding="utf-8")
 
-    debug = _env_truthy("FIX_UNIQUE_NOUNS_DEBUG")
-    debug_log_path = os.getenv("FIX_UNIQUE_NOUNS_DEBUG_PATH")
+    debug = bool(args.debug) or _env_truthy("FIX_UNIQUE_NOUNS_DEBUG")
+    debug_log_path = (args.debug_log_path_cli or "").strip() or os.getenv("FIX_UNIQUE_NOUNS_DEBUG_PATH")
     try:
         debug_max_chars = int(os.getenv("FIX_UNIQUE_NOUNS_DEBUG_MAX_CHARS", "8000"))
     except ValueError:
         debug_max_chars = 8000
 
-    debug_dump_response_json = _env_truthy("FIX_UNIQUE_NOUNS_DEBUG_DUMP_RESPONSE_JSON")
+    debug_dump_response_json = bool(args.debug_dump_response_json) or _env_truthy("FIX_UNIQUE_NOUNS_DEBUG_DUMP_RESPONSE_JSON")
     try:
         debug_response_json_max_chars = int(os.getenv("FIX_UNIQUE_NOUNS_DEBUG_RESPONSE_JSON_MAX_CHARS", "20000"))
     except ValueError:
@@ -307,6 +361,15 @@ def main() -> None:
     if debug:
         print(
             f"[fix_proper_nouns_gpt][debug] reasoning_effort={reasoning_effort} verbosity={verbosity}",
+            file=sys.stderr,
+        )
+
+        endpoint = os.getenv("ENDPOINT_URL", "").strip()
+        api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
+        print(
+            "[fix_proper_nouns_gpt][debug] azure_openai "
+            f"endpoint={endpoint!r} api_version={api_version!r} deployment={args.deployment!r} "
+            f"timeout={args.timeout_seconds}s blocks_per_chunk={args.blocks_per_chunk} max_completion_tokens={args.max_completion_tokens}",
             file=sys.stderr,
         )
 
@@ -331,7 +394,7 @@ def main() -> None:
         output_path.write_text(srt_text, encoding="utf-8")
         return
 
-    blocks_per_chunk = 100
+    blocks_per_chunk = max(1, int(args.blocks_per_chunk))
     print(
         f"[fix_proper_nouns_gpt] Processing {len(all_blocks)} blocks in chunks of {blocks_per_chunk}...",
         file=sys.stderr,
@@ -350,6 +413,8 @@ def main() -> None:
                 system_prompt=system_prompt,
                 dictionary_text=dictionary_text,
                 srt_text=chunk_srt,
+                timeout_seconds=float(args.timeout_seconds),
+                max_completion_tokens=int(args.max_completion_tokens),
                 debug=debug,
                 debug_label=f"chunk {idx}",
                 debug_log_path=debug_log_path,
