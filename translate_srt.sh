@@ -2,18 +2,22 @@
 set -euo pipefail
 
 show_help() {
-  echo "Usage: $0 -i <input.srt> [-o <output_dir>]"
+  echo "Usage: $0 -i <input.srt> [-o <output_dir>] [-s <src_locale>] [-t <dst_locale>]" >&2
   exit 1
 }
 
 #--- 引数パース --------------------------------------------------------------
 INPUT=""
 OUTDIR=""
+SRC_LOCALE=""
+DST_LOCALE=""
 
-while getopts ":i:o:" opt; do
+while getopts ":i:o:s:t:" opt; do
   case "$opt" in
     i) INPUT="$OPTARG" ;;
     o) OUTDIR="$OPTARG" ;;
+    s) SRC_LOCALE="$OPTARG" ;;
+    t) DST_LOCALE="$OPTARG" ;;
     *) show_help ;;
   esac
 done
@@ -25,4 +29,7 @@ done
 OUTDIR="${OUTDIR:-$(dirname "$INPUT")}"
 
 #--- Python スクリプトを実行 -------------------------------------------------
-python translate_srt_gpt.py -i "$INPUT" -o "$OUTDIR"
+ARGS=( -i "$INPUT" -o "$OUTDIR" )
+[[ -n "$SRC_LOCALE" ]] && ARGS+=( --src-locale "$SRC_LOCALE" )
+[[ -n "$DST_LOCALE" ]] && ARGS+=( --dst-locale "$DST_LOCALE" )
+python translate_srt_gpt.py "${ARGS[@]}"

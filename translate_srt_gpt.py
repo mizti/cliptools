@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""英語 SRT を GPT で日本語に翻訳するスクリプト。
+"""SRT を GPT で翻訳するスクリプト（デフォルト: 英語→日本語）。
 
 SRT を「字幕ブロック」単位（連番・タイムスタンプ・セリフ群・空行）で分割し、
 20 ブロックずつまとめて生成 AI に投げます。
@@ -26,6 +26,21 @@ from utils.srt_parser import SRTBlock, blocks_to_text, parse_srt_blocks, validat
 parser = argparse.ArgumentParser()
 parser.add_argument('-i', '--input',      required=True, help='SRT file to translate')
 parser.add_argument('-o', '--output_dir', required=True, help='Directory to write result')
+parser.add_argument(
+    '--src-locale',
+    default=os.getenv('TRANSLATE_SRC_LOCALE', 'en-US'),
+    help='Source locale (default: en-US; env: TRANSLATE_SRC_LOCALE)'
+)
+parser.add_argument(
+    '--dst-locale',
+    default=os.getenv('TRANSLATE_DST_LOCALE', 'ja-JP'),
+    help='Destination locale (default: ja-JP; env: TRANSLATE_DST_LOCALE)'
+)
+parser.add_argument(
+    '--prompt-path',
+    default=os.getenv('TRANSLATE_PROMPT_PATH', ''),
+    help='System prompt file path (default: auto; env: TRANSLATE_PROMPT_PATH)'
+)
 parser.add_argument(
     '--chunk',
     dest='blocks_per_request',
@@ -68,18 +83,21 @@ src_path = Path(args.input)
 out_dir  = Path(args.output_dir)
 out_dir.mkdir(parents=True, exist_ok=True)
 
+src_locale = (args.src_locale or 'en-US').strip()
+dst_locale = (args.dst_locale or 'ja-JP').strip()
+
 # 出力ファイル名のポリシー:
-# - 入力ファイル名に "en-US" が含まれている場合:
-#     Speaker1_en-US.srt           -> Speaker1_ja-JP.srt
-#     Speaker1_en-US_fixed.srt     -> Speaker1_ja-JP_fixed.srt
-#   のように、"en-US" を "ja-JP" に差し替える。
-# - それ以外の場合:
-#     従来通り "ja-<元ファイル名>" を先頭に付ける。
+# - 入力ファイル名に src_locale が含まれている場合は dst_locale に差し替える
+# - それ以外の場合は dst_locale を接頭辞として付与する
+#   - ただし既存互換のため、デフォルト(en-US→ja-JP)で src_locale が含まれない場合は従来通り "ja-" を付与
 name_str = src_path.name
-if "en-US" in name_str:
-    dst_name = name_str.replace("en-US", "ja-JP")
+if src_locale and (src_locale in name_str):
+    dst_name = name_str.replace(src_locale, dst_locale)
 else:
-    dst_name = f"ja-{name_str}"
+    if src_locale == 'en-US' and dst_locale == 'ja-JP':
+        dst_name = f"ja-{name_str}"
+    else:
+        dst_name = f"{dst_locale}-{name_str}"
 
 dst_path = out_dir / dst_name
 
@@ -105,7 +123,16 @@ def debug_log(msg: str) -> None:
         print(f"[DEBUG] {msg}", file=sys.stderr)
 
 # ─────────────── システムプロンプト読み込み ─────────────────────────────────
-prompt_path = Path("settings/system_prompt.txt")
+prompt_path_cli = (args.prompt_path or "").strip()
+if prompt_path_cli:
+    prompt_path = Path(prompt_path_cli)
+else:
+    # Direction-aware defaults
+    if dst_locale == 'ja-JP':
+        prompt_path = Path("settings/system_prompt.txt")
+    else:
+        prompt_path = Path("settings/system_prompt_ja_to_en.txt")
+
 if not prompt_path.is_file():
     print(f"[ERROR] System prompt not found: {prompt_path}", file=sys.stderr)
     sys.exit(1)
@@ -181,6 +208,7 @@ total_chunks = (len(blocks) + BLOCKS_PER_REQUEST - 1) // BLOCKS_PER_REQUEST
 
 debug_log(
     "translate_srt_gpt.py config: "
+    f"src_locale={src_locale!r} dst_locale={dst_locale!r} prompt={str(prompt_path)!r} "
     f"endpoint={os.getenv('ENDPOINT_URL','')!r} "
     f"api_version={os.getenv('AZURE_OPENAI_API_VERSION','2025-04-01-preview')!r} "
     f"deployment={deployment!r} "
@@ -299,10 +327,9 @@ for idx, block_group in enumerate(
             print(f"[WARN] block {idx}: empty response: status={reason}", file=sys.stderr)
             content = ""
 
-        # ― 念のため、生成された本文から全角の句点「。」を除去してから書き出す ―
-        #   GPT が指示に反して句点を付けてしまった場合でも、ここで落とすことで
-        #   出力 SRT のポリシー（行末に句点を付けない）を守る。
-        content = content.replace("。", "")
+        # 日本語出力のときだけ、全角の句点「。」を除去してポリシーを守る。
+        if dst_locale.lower().startswith("ja"):
+            content = content.replace("。", "")
 
     # --debug-dump が指定されている場合は、最初のチャンクに対するモデル応答を
     # そのまま標準出力に書き出して終了する。プロンプトとの噛み合わせ調査用。

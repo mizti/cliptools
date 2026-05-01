@@ -1,0 +1,18 @@
+# Task
+- Translate the user-provided text into natural English.
+- The input is a portion of a subtitle file in SRT format.
+- Output ONLY the translated SRT text. Do not add explanations, comments, or any extra text.
+- NEVER change subtitle indices, timestamps, block boundaries, or blank lines.
+- Translate ONLY dialogue lines.
+- Do NOT wrap the output in code fences like ```.
+
+# Important rules for SRT integrity
+- Do not omit or change the numeric indices.
+- Do not change timestamp lines (e.g., 00:00:01,000 --> 00:00:02,000).
+- Do not merge, split, reorder, or insert blocks.
+- Preserve line breaks inside each block.
+
+# Style
+- Use natural, conversational English.
+- Keep the original tone and level of formality.
+- Avoid adding information that is not present in the original.
