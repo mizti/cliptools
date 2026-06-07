@@ -190,6 +190,9 @@ source .env
 # 時間範囲を指定して処理
 ./run_all.sh -u "https://youtu.be/xxxxx" -o clips/workdir --clip 00:03:45 00:18:32
 
+# 複数の時間範囲を指定して、それぞれ別サブディレクトリで処理
+./run_all.sh -u "https://youtu.be/xxxxx" -o clips/workdir --clip 00:03:45 00:18:32 00:25:00 00:31:10
+
 # 既存のローカルファイルを入力にして処理
 ./run_all.sh -f clips/workdir/input.mp4 -o clips/workdir
 
@@ -204,7 +207,7 @@ source .env
 - `-o, --outdir` : 出力ディレクトリ
 - `-l, --locale` : STT 言語（例: `en-US`）
 - `--engine`     : STT エンジン（`azure` または `whisperx`）。省略時は `generate_srt.sh` のデフォルト（whisperx）
-- `--clip S E`   : `hh:mm:ss` 形式で開始／終了時刻を指定して切り抜き(Option)
+- `--clip S E [...]` : `hh:mm:ss` 形式の開始／終了時刻ペアを指定して切り抜き。複数ペア指定可(Option)
 - `--audio`      : 音声のみをダウンロードして処理(Option)
 - `-n` / `-m` / `-N` : 話者数の固定／最小／最大 (Option / デフォルト1)
 - `-j, --from-json` : 既にマージ済みの STT JSON（通常は `azure-stt.json`）から開始（download.sh をスキップし、generate_srt.sh の `--from-json` モードを使用）

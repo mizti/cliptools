@@ -9,7 +9,7 @@
 #
 # 追加仕様:
 # 使い方:
-#   ./run_all.sh -u <YouTube URL> [-o <dir>] [-l <locale>] [--clip S E] [--audio] [-N <number>]
+#   ./run_all.sh -u <YouTube URL> [-o <dir>] [-l <locale>] [--clip S E [S E ...]] [--audio] [-N <number>]
 #
 #   -u|--url       : ダウンロードしたい YouTube URL               (必須)
 #   -o|--outdir    : 出力ディレクトリ (既定: カレント)
@@ -20,7 +20,7 @@
 #   -n <N>            : 話者数を N に固定               （-m/-N と排他）
 #   -m <MIN>          : 最小話者数
 #   -N/-M <MAX>       : 最大話者数
-#   --clip S E        : hh:mm:ss-hh:mm:ss で切り抜き DL
+#   --clip S E [...]  : hh:mm:ss の START END ペアで切り抜き DL。複数ペア指定可
 #   --audio           : 音声のみ DL（download.sh -w）
 #
 # 使い方例:
@@ -48,7 +48,8 @@ FROM_WHISPER_JSON="" # 既存の whisper-cli JSON から開始（内部フォー
 FROM_SRT=""          # 既存の英語 SRT から開始（固有名詞補正→翻訳）
 LOCALE="en-US"
 ENGINE=""          # azure|whisperx. 空なら generate_srt.sh 側のデフォルトに任せる
-START="" END=""
+CLIP_STARTS=()
+CLIP_ENDS=()
 AUDIO_ONLY=false
 
 FIX_SPK=""           # -n
@@ -57,7 +58,7 @@ MAX_SPK=""           # -N/-M
 
 # ────────────── ヘルプ
 show_help() {
-  sed -n '5,40p' "$0"
+  sed -n '5,39p' "$0"
 }
 
 # ────────────── 引数パース
@@ -68,7 +69,25 @@ while [[ $# -gt 0 ]]; do
     -o|--outdir)OUTDIR="$2";    shift 2 ;;
     -l|--locale)LOCALE="$2";    shift 2 ;;
     --engine)   ENGINE="$2";    shift 2 ;;
-    --clip)     START="$2"; END="$3"; shift 3 ;;
+    --clip)
+      shift
+      added_clip=false
+      while [[ $# -ge 2 && "$1" != -* && "$2" != -* ]]; do
+        CLIP_STARTS+=("$1")
+        CLIP_ENDS+=("$2")
+        shift 2
+        added_clip=true
+        [[ $# -eq 0 || "$1" == -* ]] && break
+      done
+      if [[ "$added_clip" != true ]]; then
+        echo "Error: --clip には START END のペアを1つ以上指定してください" >&2
+        exit 1
+      fi
+      if [[ $# -gt 0 && "$1" != -* ]]; then
+        echo "Error: --clip の引数は START END の偶数個で指定してください: $1" >&2
+        exit 1
+      fi
+      ;;
     --audio)    AUDIO_ONLY=true;shift ;;
     -n|--spk)   FIX_SPK="$2";   shift 2 ;;
     -m|--min)   MIN_SPK="$2";   shift 2 ;;
@@ -114,6 +133,95 @@ fi
 if [[ -n $FIX_SPK && ( -n $MIN_SPK || -n $MAX_SPK ) ]]; then
   echo "Error: -n は -m/-N と同時に使えません" >&2; exit 1
 fi
+if [[ ${#CLIP_STARTS[@]} -gt 0 && -z $URL ]]; then
+  echo "Error: --clip は -u/--url と組み合わせて指定してください" >&2; exit 1
+fi
+
+run_hype_finder() {
+  local url="$1"
+  local outdir="$2"
+
+  ###########################################################################
+  # (optional) hype-finder: analyze live chat replay to find hype segments
+  # Runs right after download.sh, because it needs the same YouTube URL.
+  # Output goes under: $outdir/hype-data/
+  ###########################################################################
+  if [[ -x ./hype_finder.sh ]]; then
+    echo "▶ 1.5/4 hype_finder.sh (live chat → hype segments)"
+    # Do not fail the whole pipeline if live_chat is unavailable for the video.
+    ./hype_finder.sh -u "$url" -o "$outdir" || echo "[warn] hype_finder failed; continuing" >&2
+  else
+    echo "[warn] ./hype_finder.sh not found/executable; skipping hype-finder" >&2
+  fi
+}
+
+run_generate_fix_translate() {
+  local media_path="$1"
+  local outdir="$2"
+  local from_json_path="${3:-}"
+
+  mkdir -p "$outdir"
+
+  if [[ -z $from_json_path ]]; then
+    [[ -f $media_path ]] || { echo "Error: ファイルがありません: $media_path"; exit 2; }
+  fi
+
+  ###############################################################################
+  # 2. 字幕生成
+  ###############################################################################
+  echo "▶ 2/4 generate_srt.sh ($LOCALE)"
+  GEN_ARGS=()
+  [[ -n $ENGINE ]] && GEN_ARGS+=( --engine "$ENGINE" )
+  [[ -n $FIX_SPK ]] && GEN_ARGS+=( -n "$FIX_SPK" )
+  [[ -n $MIN_SPK ]] && GEN_ARGS+=( -m "$MIN_SPK" )
+  [[ -n $MAX_SPK ]] && GEN_ARGS+=( -M "$MAX_SPK" )
+
+  # zsh + set -u だと、空配列の "${GEN_ARGS[@]}" 展開が unbound 扱いになることがあるため、
+  # 要素数を見て分岐させてから generate_srt.sh を呼び出す。
+  if [[ -n $from_json_path ]]; then
+    # 既存 JSON から開始する場合
+    if [[ ${#GEN_ARGS[@]} -gt 0 ]]; then
+      ./generate_srt.sh --from-json "$from_json_path" -o "$outdir" "${GEN_ARGS[@]}" "$LOCALE"
+    else
+      ./generate_srt.sh --from-json "$from_json_path" -o "$outdir" "$LOCALE"
+    fi
+  elif [[ ${#GEN_ARGS[@]} -gt 0 ]]; then
+    ./generate_srt.sh -o "$outdir" "${GEN_ARGS[@]}" "$media_path" "$LOCALE"       # :contentReference[oaicite:2]{index=2}
+  else
+    ./generate_srt.sh -o "$outdir" "$media_path" "$LOCALE"       # オプションなし
+  fi
+
+  # 生成された SRT 一覧（outdir 配下）
+  SRT_PATTERN="Speaker*_${LOCALE}.srt"
+  shopt -s nullglob
+  SRT_FILES=("$outdir"/$SRT_PATTERN)
+  shopt -u nullglob
+  [[ ${#SRT_FILES[@]} -gt 0 ]] || { echo "Error: SRT が見つかりません"; exit 3; }
+
+  ###############################################################################
+  # 3. 固有名詞補正 (英語 SRT → 英語 SRT fixed)
+  ###############################################################################
+  echo "▶ 3/4 fix_unique_nouns.py (proper nouns in EN SRT)"
+  FIXED_SRT_FILES=()
+  for srt in "${SRT_FILES[@]}"; do
+    # 出力ファイル名は <元ファイル名>_fixed.srt
+    fixed_srt="${srt%.srt}_fixed.srt"
+    python fix_unique_nouns.py "$srt" -o "$fixed_srt" || {
+      echo "[warn] fix_unique_nouns.py failed for $srt; using original SRT" >&2
+      FIXED_SRT_FILES+=("$srt")
+      continue
+    }
+    FIXED_SRT_FILES+=("$fixed_srt")
+  done
+
+  ###############################################################################
+  # 4. 翻訳
+  ###############################################################################
+  echo "▶ 4/4 translate_srt.sh → *_ja-JP.srt"
+  for srt in "${FIXED_SRT_FILES[@]}"; do
+    ./translate_srt.sh -i "$srt" -o "$outdir"                     # :contentReference[oaicite:3]{index=3}
+  done
+}
 
 # -f が指定されていて -o が指定されていない場合は、入力ファイルと同じディレクトリを
 # デフォルトの出力ディレクトリとして扱う。
@@ -204,11 +312,45 @@ elif [[ -n $URL ]]; then
   }
   BASENAME=$(get_safe_basename "$OUTDIR")
 
+  get_clip_label() {
+    local start="$1"
+    local end="$2"
+    local label="${start}_${end}"
+    echo "${label//[^a-zA-Z0-9._-]/_}"
+  }
+
+  if [[ ${#CLIP_STARTS[@]} -gt 1 ]]; then
+    mkdir -p "$OUTDIR"
+    run_hype_finder "$URL" "$OUTDIR"
+
+    echo "▶ 1/4 download.sh (multiple clips: ${#CLIP_STARTS[@]})"
+    EXT=$($AUDIO_ONLY && echo "mp3" || echo "mp4")
+    for i in "${!CLIP_STARTS[@]}"; do
+      clip_no=$((i + 1))
+      clip_label=$(get_clip_label "${CLIP_STARTS[$i]}" "${CLIP_ENDS[$i]}")
+      clip_outdir="${OUTDIR%/}/clip_${clip_no}_${clip_label}"
+      clip_basename="${BASENAME}_clip_${clip_no}_${clip_label}"
+      mkdir -p "$clip_outdir"
+
+      DL_ARGS=(-s "${CLIP_STARTS[$i]}" -e "${CLIP_ENDS[$i]}")
+      $AUDIO_ONLY && DL_ARGS+=(-w)
+
+      echo "▶ 1/4 download.sh clip ${clip_no}/${#CLIP_STARTS[@]} (${CLIP_STARTS[$i]} → ${CLIP_ENDS[$i]})"
+      ./download.sh -u "$URL" -o "$clip_outdir" -b "$clip_basename" "${DL_ARGS[@]}"
+
+      MEDIA_PATH="${clip_outdir%/}/${clip_basename}.${EXT}"
+      run_generate_fix_translate "$MEDIA_PATH" "$clip_outdir"
+    done
+
+    echo "✅ 完了: 出力先 → $OUTDIR"
+    exit 0
+  fi
+
   DL_ARGS=()
-  [[ -n $START && -n $END ]] && DL_ARGS+=(-s "$START" -e "$END")
+  [[ ${#CLIP_STARTS[@]} -eq 1 ]] && DL_ARGS+=(-s "${CLIP_STARTS[0]}" -e "${CLIP_ENDS[0]}")
   $AUDIO_ONLY && DL_ARGS+=(-w)
 
-  echo "▶ 1/3 download.sh"
+  echo "▶ 1/4 download.sh"
   # zsh + set -u だと、空配列の "${DL_ARGS[@]}" 展開が unbound 扱いになることがあるため、
   # 要素数を見て分岐させてから download.sh を呼び出す。
   if [[ ${#DL_ARGS[@]} -gt 0 ]]; then
@@ -217,18 +359,7 @@ elif [[ -n $URL ]]; then
     ./download.sh -u "$URL" -o "$OUTDIR" -b "$BASENAME"
   fi
 
-  ###########################################################################
-  # (optional) hype-finder: analyze live chat replay to find hype segments
-  # Runs right after download.sh, because it needs the same YouTube URL.
-  # Output goes under: $OUTDIR/hype-data/
-  ###########################################################################
-  if [[ -x ./hype_finder.sh ]]; then
-    echo "▶ 1.5/3 hype_finder.sh (live chat → hype segments)"
-    # Do not fail the whole pipeline if live_chat is unavailable for the video.
-    ./hype_finder.sh -u "$URL" -o "$OUTDIR" || echo "[warn] hype_finder failed; continuing" >&2
-  else
-    echo "[warn] ./hype_finder.sh not found/executable; skipping hype-finder" >&2
-  fi
+  run_hype_finder "$URL" "$OUTDIR"
 
   EXT=$($AUDIO_ONLY && echo "mp3" || echo "mp4")
   MEDIA_PATH="${OUTDIR%/}/${BASENAME}.${EXT}"
@@ -240,7 +371,7 @@ elif [[ -n $URL ]]; then
 else
   # 既存ファイルを使用
   MEDIA_PATH="$MEDIA_FILE"
-  echo "▶ 1/3 既存メディア使用: $MEDIA_PATH"
+  echo "▶ 1/4 既存メディア使用: $MEDIA_PATH"
 fi
 
 # --from-json で -o が省略された場合も、JSON ファイルと同じディレクトリを
@@ -249,67 +380,7 @@ if [[ -n $FROM_JSON && "$OUTDIR" == "." ]]; then
   OUTDIR=$(dirname "$FROM_JSON")
 fi
 
-mkdir -p "$OUTDIR"
-
-if [[ -z $FROM_JSON ]]; then
-  [[ -f $MEDIA_PATH ]] || { echo "Error: ファイルがありません: $MEDIA_PATH"; exit 2; }
-fi
-
-###############################################################################
-# 2. 字幕生成
-###############################################################################
-echo "▶ 2/3 generate_srt.sh ($LOCALE)"
-GEN_ARGS=()
-[[ -n $ENGINE ]] && GEN_ARGS+=( --engine "$ENGINE" )
-[[ -n $FIX_SPK ]] && GEN_ARGS+=( -n "$FIX_SPK" )
-[[ -n $MIN_SPK ]] && GEN_ARGS+=( -m "$MIN_SPK" )
-[[ -n $MAX_SPK ]] && GEN_ARGS+=( -M "$MAX_SPK" )
-
-# zsh + set -u だと、空配列の "${GEN_ARGS[@]}" 展開が unbound 扱いになることがあるため、
-# 要素数を見て分岐させてから generate_srt.sh を呼び出す。
-if [[ -n $FROM_JSON ]]; then
-  # 既存 JSON から開始する場合
-  if [[ ${#GEN_ARGS[@]} -gt 0 ]]; then
-    ./generate_srt.sh --from-json "$FROM_JSON" -o "$OUTDIR" "${GEN_ARGS[@]}" "$LOCALE"
-  else
-    ./generate_srt.sh --from-json "$FROM_JSON" -o "$OUTDIR" "$LOCALE"
-  fi
-elif [[ ${#GEN_ARGS[@]} -gt 0 ]]; then
-  ./generate_srt.sh -o "$OUTDIR" "${GEN_ARGS[@]}" "$MEDIA_PATH" "$LOCALE"       # :contentReference[oaicite:2]{index=2}
-else
-  ./generate_srt.sh -o "$OUTDIR" "$MEDIA_PATH" "$LOCALE"       # オプションなし
-fi
-
-# 生成された SRT 一覧（OUTDIR 配下）
-SRT_PATTERN="Speaker*_${LOCALE}.srt"
-shopt -s nullglob
-SRT_FILES=("$OUTDIR"/$SRT_PATTERN)
-shopt -u nullglob
-[[ ${#SRT_FILES[@]} -gt 0 ]] || { echo "Error: SRT が見つかりません"; exit 3; }
-
-###############################################################################
-# 3. 固有名詞補正 (英語 SRT → 英語 SRT fixed)
-###############################################################################
-echo "▶ 3/4 fix_unique_nouns.py (proper nouns in EN SRT)"
-FIXED_SRT_FILES=()
-for srt in "${SRT_FILES[@]}"; do
-  # 出力ファイル名は <元ファイル名>_fixed.srt
-  fixed_srt="${srt%.srt}_fixed.srt"
-  python fix_unique_nouns.py "$srt" -o "$fixed_srt" || {
-    echo "[warn] fix_unique_nouns.py failed for $srt; using original SRT" >&2
-    FIXED_SRT_FILES+=("$srt")
-    continue
-  }
-  FIXED_SRT_FILES+=("$fixed_srt")
-done
-
-###############################################################################
-# 4. 翻訳
-###############################################################################
-echo "▶ 4/4 translate_srt.sh → *_ja-JP.srt"
-for srt in "${FIXED_SRT_FILES[@]}"; do
-  ./translate_srt.sh -i "$srt" -o "$OUTDIR"                     # :contentReference[oaicite:3]{index=3}
-done
+run_generate_fix_translate "$MEDIA_PATH" "$OUTDIR" "$FROM_JSON"
 
 echo "✅ 完了: 出力先 → $OUTDIR"
 exit 0
