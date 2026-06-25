@@ -214,8 +214,8 @@ def auto_top_k(video_length_sec: float) -> int:
     if video_length_sec <= 0:
         return 0
     L_min = video_length_sec / 60.0
-    # k_default = max(2, 1 + floor(L / 30))
-    k = max(2, 1 + int(L_min // 30))
+    # 30分あたり約5個の hype セグメントを返す
+    k = max(2, int(math.ceil(L_min / 6.0)))
     return k
 
 
