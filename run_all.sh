@@ -155,6 +155,74 @@ run_hype_finder() {
   fi
 }
 
+write_download_metadata() {
+  local url="$1"
+  local outdir="$2"
+  local media_path="$3"
+  local clip_start="${4:-}"
+  local clip_end="${5:-}"
+  local metadata_file="${outdir%/}/source_metadata.json"
+  local raw_metadata_file
+
+  mkdir -p "$outdir"
+  raw_metadata_file=$(mktemp "${outdir%/}/.yt_dlp_metadata.XXXXXX")
+
+  # URL は yt-dlp の取得成否にかかわらず保存する。動画タイトルや配信者などの
+  # 追加情報は、ダウンロード後に yt-dlp から取得できた場合だけ併記する。
+  if command -v yt-dlp >/dev/null 2>&1; then
+    if ! yt-dlp --no-playlist --skip-download --dump-single-json "$url" > "$raw_metadata_file" 2>/dev/null; then
+      echo "[warn] yt-dlp のメタデータ取得に失敗しました。URL のみ保存します: $url" >&2
+      : > "$raw_metadata_file"
+    fi
+  else
+    echo "[warn] yt-dlp が見つかりません。URL のみ保存します: $url" >&2
+  fi
+
+  python - "$url" "$media_path" "$clip_start" "$clip_end" "$raw_metadata_file" "$metadata_file" <<'PY'
+import datetime
+import json
+import os
+import sys
+
+source_url, media_path, clip_start, clip_end, raw_path, output_path = sys.argv[1:]
+yt_dlp_metadata = {}
+
+try:
+    with open(raw_path, encoding="utf-8") as metadata_file:
+        yt_dlp_metadata = json.load(metadata_file)
+except (OSError, json.JSONDecodeError):
+    pass
+
+metadata_fields = (
+    "id", "title", "webpage_url", "original_url", "channel", "channel_id",
+    "uploader", "uploader_id", "upload_date", "duration", "view_count",
+    "like_count", "thumbnail", "description", "extractor",
+)
+video_metadata = {
+    field: yt_dlp_metadata[field]
+    for field in metadata_fields
+    if field in yt_dlp_metadata and yt_dlp_metadata[field] is not None
+}
+
+metadata = {
+    "source_url": source_url,
+    "downloaded_file": os.path.abspath(media_path),
+    "download_completed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "clip": {
+        "start": clip_start or None,
+        "end": clip_end or None,
+    },
+    "video": video_metadata,
+}
+
+with open(output_path, "w", encoding="utf-8") as metadata_file:
+    json.dump(metadata, metadata_file, ensure_ascii=False, indent=2)
+    metadata_file.write("\n")
+PY
+  rm -f "$raw_metadata_file"
+  echo "  メタデータ保存: $metadata_file"
+}
+
 run_generate_fix_translate() {
   local media_path="$1"
   local outdir="$2"
@@ -339,6 +407,7 @@ elif [[ -n $URL ]]; then
       ./download.sh -u "$URL" -o "$clip_outdir" -b "$clip_basename" "${DL_ARGS[@]}"
 
       MEDIA_PATH="${clip_outdir%/}/${clip_basename}.${EXT}"
+      write_download_metadata "$URL" "$clip_outdir" "$MEDIA_PATH" "${CLIP_STARTS[$i]}" "${CLIP_ENDS[$i]}"
       run_generate_fix_translate "$MEDIA_PATH" "$clip_outdir"
     done
 
@@ -363,6 +432,7 @@ elif [[ -n $URL ]]; then
 
   EXT=$($AUDIO_ONLY && echo "mp3" || echo "mp4")
   MEDIA_PATH="${OUTDIR%/}/${BASENAME}.${EXT}"
+  write_download_metadata "$URL" "$OUTDIR" "$MEDIA_PATH" "${CLIP_STARTS[0]:-}" "${CLIP_ENDS[0]:-}"
   # -o が指定されていない場合は、ダウンロードされたメディアファイルのディレクトリを
   # デフォルトの出力ディレクトリとして扱う（既存ファイルを処理する -f の挙動と揃える）。
   if [[ "$OUTDIR" == "." ]]; then
