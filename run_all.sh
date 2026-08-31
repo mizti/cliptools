@@ -9,7 +9,7 @@
 #
 # 追加仕様:
 # 使い方:
-#   ./run_all.sh -u <YouTube URL> [-o <dir>] [-l <locale>] [--clip S E [S E ...]] [--audio] [-N <number>]
+#   ./run_all.sh -u <YouTube URL> [-o <dir>] [-l <locale>] [--clip S E [S E ...]] [--audio] [--reencode] [-N <number>]
 #
 #   -u|--url       : ダウンロードしたい YouTube URL               (必須)
 #   -o|--outdir    : 出力ディレクトリ (既定: カレント)
@@ -22,6 +22,7 @@
 #   -N/-M <MAX>       : 最大話者数
 #   --clip S E [...]  : hh:mm:ss の START END ペアで切り抜き DL。複数ペア指定可
 #   --audio           : 音声のみ DL（download.sh -w）
+#   --reencode        : ダウンロード後にPremiere向けへ再エンコード
 #
 # 使い方例:
 # ▸ URL から取得して話者数を 2–4 人として処理
@@ -51,6 +52,7 @@ ENGINE=""          # azure|whisperx. 空なら generate_srt.sh 側のデフォ�
 CLIP_STARTS=()
 CLIP_ENDS=()
 AUDIO_ONLY=false
+REENCODE=false
 
 FIX_SPK=""           # -n
 MIN_SPK=""           # -m
@@ -89,6 +91,7 @@ while [[ $# -gt 0 ]]; do
       fi
       ;;
     --audio)    AUDIO_ONLY=true;shift ;;
+    --reencode) REENCODE=true;shift ;;
     -n|--spk)   FIX_SPK="$2";   shift 2 ;;
     -m|--min)   MIN_SPK="$2";   shift 2 ;;
   -N|--max|-M)MAX_SPK="$2";   shift 2 ;;
@@ -402,6 +405,7 @@ elif [[ -n $URL ]]; then
 
       DL_ARGS=(-s "${CLIP_STARTS[$i]}" -e "${CLIP_ENDS[$i]}")
       $AUDIO_ONLY && DL_ARGS+=(-w)
+      $REENCODE && DL_ARGS+=(--reencode)
 
       echo "▶ 1/4 download.sh clip ${clip_no}/${#CLIP_STARTS[@]} (${CLIP_STARTS[$i]} → ${CLIP_ENDS[$i]})"
       ./download.sh -u "$URL" -o "$clip_outdir" -b "$clip_basename" "${DL_ARGS[@]}"
@@ -418,6 +422,7 @@ elif [[ -n $URL ]]; then
   DL_ARGS=()
   [[ ${#CLIP_STARTS[@]} -eq 1 ]] && DL_ARGS+=(-s "${CLIP_STARTS[0]}" -e "${CLIP_ENDS[0]}")
   $AUDIO_ONLY && DL_ARGS+=(-w)
+  $REENCODE && DL_ARGS+=(--reencode)
 
   echo "▶ 1/4 download.sh"
   # zsh + set -u だと、空配列の "${DL_ARGS[@]}" 展開が unbound 扱いになることがあるため、

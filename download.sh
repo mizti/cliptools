@@ -10,6 +10,7 @@ USER_BASENAME=""
 START_TIME=""
 END_TIME=""
 AUDIO_ONLY=false
+REENCODE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -25,15 +26,17 @@ while [[ $# -gt 0 ]]; do
       END_TIME="$2"; shift 2 ;;
     -w|--audio-only)
       AUDIO_ONLY=true; shift ;;
+    --reencode)
+      REENCODE=true; shift ;;
     -h|--help)
-      echo "Usage: $0 -u <YouTube URL> [-o output_dir] [-b basename] [-s start_time] [-e end_time] [-w]"; exit 0 ;;
+      echo "Usage: $0 -u <YouTube URL> [-o output_dir] [-b basename] [-s start_time] [-e end_time] [-w] [--reencode]"; exit 0 ;;
     *)
       echo "Unknown option $1" >&2; exit 1 ;;
   esac
 done
 
 if [[ -z $URL ]]; then
-  echo "Usage: $0 -u <YouTube URL> [-o output_dir] [-b basename] [-s start_time] [-e end_time] [-w]" >&2
+  echo "Usage: $0 -u <YouTube URL> [-o output_dir] [-b basename] [-s start_time] [-e end_time] [-w] [--reencode]" >&2
   exit 1
 fi
 
@@ -52,11 +55,10 @@ fi
 # This script has two separate “Route A/B” decisions:
 #
 # 1) Pre-download (format selection) — implemented in select_format_ids():
-#    - ROUTE A: If a *Premiere-safe* stream exists at/above PREFERRED_HEIGHT,
-#      download that stream directly (no forced re-encode intent).
+#    - Default: select the highest-quality Premiere-safe stream and do not re-encode.
+#    - --reencode: use the previous Route A/B behavior, allowing VP9/AV1 so that
+#      the downloaded file can be re-encoded locally.
 #      "Premiere-safe" here means: H.264 (avc1/h264) video in MP4 container + AAC audio.
-#    - ROUTE B: Otherwise, download the highest-resolution stream available (optionally
-#      preferring VP9/AV1 when FORCE_NON_PREMIERE_SAFE=1), then we may re-encode locally.
 #
 #    fps preference:
 #      - By default, we prefer fps>=60 *when such a stream exists* (PREFER_60FPS=1).
@@ -71,7 +73,7 @@ fi
 select_format_ids() {
   local video_url="$1"
 
-  # Env vars for ROUTE A/B (format selection):
+  # Env vars for Route A/B (format selection when --reencode is used):
   #   PREFERRED_HEIGHT           : Route A minimum height threshold (default 1440)
   #   FORCE_ROUTE_B=1            : skip Route A entirely (always pick Route B)
   #   FORCE_NON_PREMIERE_SAFE=1  : in Route B, prefer VP9/AV1 (to force re-encode)
@@ -82,6 +84,8 @@ select_format_ids() {
   local force_route_b="${FORCE_ROUTE_B:-0}"
   local force_non_premiere="${FORCE_NON_PREMIERE_SAFE:-0}"
   local prefer_60fps="${PREFER_60FPS:-1}"
+  local reencode="0"
+  [[ "$REENCODE" == true ]] && reencode="1"
 
   # Probe formats as JSON (avoid set -e killing the script on failure)
   set +e
@@ -109,6 +113,7 @@ select_format_ids() {
     --argjson force_route_b "$force_route_b" \
     --argjson force_non_premiere "$force_non_premiere" \
     --argjson prefer_60fps "$prefer_60fps" \
+    --argjson reencode "$reencode" \
     '
 def is_video: (.vcodec? // "none") != "none";
 def is_audio: (.acodec? // "none") != "none";
@@ -118,15 +123,31 @@ def has_h264: ((.vcodec? // "") | test("(avc1|h264)"));
 def has_aac: ((.acodec? // "") | test("(mp4a|aac)"));
 def is_non_premiere_video: ((.vcodec? // "") | test("(vp09|av01|vp9|av1)"));
 def is_60fps: (fps_f >= 60);
+def is_not_drc: (((.format_id? // "") | test("-drc$")) | not);
 
-def audio_pool: (.formats // []) | map(select(is_audio));
+def audio_pool: (.formats // []) | map(select(is_audio and is_not_drc));
 def best_audio:
   (audio_pool | map(select(has_aac)) | sort_by(.abr? // 0) | last)
   // (audio_pool | sort_by(.abr? // 0) | last);
 
+def best_safe_audio:
+  (audio_pool | map(select(has_aac)) | sort_by(.abr? // 0) | last);
+
+def route_safe_video:
+  (.formats // [])
+  | map(select(is_video and is_not_drc))
+  | map(select(has_h264 and (.ext? == "mp4")))
+  | (if $prefer_60fps == 1 then
+       (. as $all | ($all | map(select(is_60fps)) | if length>0 then . else $all end))
+     else
+       .
+     end)
+  | sort_by([fps_f, height_i])
+  | last;
+
 def route_a_video:
   (.formats // [])
-  | map(select(is_video))
+  | map(select(is_video and is_not_drc))
   | map(select(height_i >= $preferred_h))
   | map(select(has_h264 and (.ext? == "mp4")))
   | (if $prefer_60fps == 1 then
@@ -138,7 +159,7 @@ def route_a_video:
   | last;
 
 def route_b_video_any:
-  (.formats // []) | map(select(is_video));
+  (.formats // []) | map(select(is_video and is_not_drc));
 
 def route_b_video_pool:
   if $force_non_premiere == 1 then
@@ -160,11 +181,15 @@ def best_video(pool):
 def out_pair(v; a):
   if (v == null) or (a == null) then empty else "\(v.format_id)+\(a.format_id)" end;
 
-if $force_route_b == 1 then
+if $reencode == 1 and $force_route_b == 1 then
   out_pair(best_video(route_b_video_pool); best_audio)
 else
-  (out_pair(route_a_video; best_audio))
-  // (out_pair(best_video(route_b_video_pool); best_audio))
+  (if $reencode == 1 then
+     (out_pair(route_a_video; best_audio))
+     // (out_pair(best_video(route_b_video_pool); best_audio))
+   else
+     out_pair(route_safe_video; best_safe_audio)
+   end)
 end
     ' 2>/dev/null || true
 }
@@ -178,15 +203,40 @@ download_video() {
 
   if [[ -n "$fmt" ]]; then
     echo "[download.sh] Using probed format ids: $fmt" >&2
-    "$PYTHON_BIN" -m pip install -U "yt-dlp[default]" && \
-      yt-dlp \
+    "$PYTHON_BIN" -m pip install -U "yt-dlp[default]"
+    if ! yt-dlp \
       -f "$fmt" \
       --merge-output-format mp4 \
       --cookies-from-browser chrome \
       --remote-components ejs:github \
       --output "$output_path" \
-      "$video_url"
+      "$video_url"; then
+      echo "[download.sh] Probed format ids failed; falling back to format expression" >&2
+      if [[ "$REENCODE" == true ]]; then
+        yt-dlp \
+          -S "res,ext" \
+          -f "bv*+ba/b" \
+          --merge-output-format mp4 \
+          --cookies-from-browser chrome \
+          --remote-components ejs:github \
+          --output "$output_path" \
+          "$video_url"
+      else
+        yt-dlp \
+          -S "fps,res,br" \
+          -f "bv*[ext=mp4][vcodec~='^(avc1|h264)']+ba[ext=m4a][acodec~='^(mp4a|aac)']/b[ext=mp4][vcodec~='^(avc1|h264)'][acodec~='^(mp4a|aac)']" \
+          --merge-output-format mp4 \
+          --cookies-from-browser chrome \
+          --remote-components ejs:github \
+          --output "$output_path" \
+          "$video_url"
+      fi
+    fi
   else
+    if [[ "$REENCODE" != true ]]; then
+      echo "[download.sh] No Premiere-safe H.264/AAC format was found; refusing to download an incompatible file." >&2
+      return 1
+    fi
     echo "[download.sh] No probed format ids; using yt-dlp defaults (-S/-f bv*+ba/b)" >&2
     "$PYTHON_BIN" -m pip install -U "yt-dlp[default]" && \
       yt-dlp \
@@ -322,10 +372,14 @@ if [[ -n "$START_TIME" && -n "$END_TIME" ]]; then
     if is_premiere_safe "$TEMP_CLIP"; then
       echo "Video is already Premiere-safe (H.264 + AAC). No re-encoding needed."
       mv "$TEMP_CLIP" "$FINAL_FILE"
-    else
+    elif [[ "$REENCODE" == true ]]; then
       echo "Video needs re-encoding for Premiere compatibility."
       reencode_to_premiere_videotoolbox "$TEMP_CLIP" "$FINAL_FILE"
       rm -f "$TEMP_CLIP"
+    else
+      echo "[download.sh] Downloaded clip is not Premiere-safe and --reencode was not specified." >&2
+      rm -f "$TEMP_CLIP" "$TEMP_FULL"
+      exit 1
     fi
     
     # Step 3: Cleanup temp files
@@ -368,10 +422,14 @@ else
     if is_premiere_safe "$TEMP_FULL"; then
       echo "Video is already Premiere-safe (H.264 + AAC). No re-encoding needed."
       mv "$TEMP_FULL" "$FINAL_FILE"
-    else
+    elif [[ "$REENCODE" == true ]]; then
       echo "Video needs re-encoding for Premiere compatibility."
       reencode_to_premiere_videotoolbox "$TEMP_FULL" "$FINAL_FILE"
       rm -f "$TEMP_FULL"
+    else
+      echo "[download.sh] Downloaded video is not Premiere-safe and --reencode was not specified." >&2
+      rm -f "$TEMP_FULL"
+      exit 1
     fi
     
     # Download thumbnail after video (highest quality available)
