@@ -70,6 +70,31 @@ def test_build_common_result_drops_invalid_words_and_segments():
     assert result["word_segments"] == []
 
 
+def test_build_common_result_sorts_incremental_segments_before_flattening():
+    report = {
+        "language": "en",
+        "segments": [
+            {
+                "start": 5,
+                "end": 6,
+                "text": "later",
+                "words": [{"word": "later", "start": 5, "end": 6}],
+            },
+            {
+                "start": 1,
+                "end": 2,
+                "text": "earlier",
+                "words": [{"word": "earlier", "start": 1, "end": 2}],
+            },
+        ],
+    }
+
+    result = build_common_result(report)
+
+    assert [segment["start"] for segment in result["segments"]] == [1.0, 5.0]
+    assert [word["word"] for word in result["word_segments"]] == ["earlier", "later"]
+
+
 def test_build_common_result_drops_padded_window_hallucinations():
     report = {
         "language": "en",

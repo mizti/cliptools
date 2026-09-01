@@ -82,7 +82,10 @@ def build_common_result(report: dict[str, Any]) -> dict[str, Any]:
                 "words": words,
             }
         )
-        word_segments.extend(dict(word) for word in words)
+
+    segments.sort(key=lambda segment: (segment["start"], segment["end"]))
+    for segment in segments:
+        word_segments.extend(dict(word) for word in segment["words"])
 
     return {
         "segments": segments,
