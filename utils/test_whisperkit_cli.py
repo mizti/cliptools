@@ -1,0 +1,101 @@
+from utils.whisperkit_cli import build_common_result
+
+
+def test_build_common_result_preserves_timing_and_scores():
+    report = {
+        "language": "en",
+        "segments": [
+            {
+                "start": 1.0,
+                "end": 2.4,
+                "text": " Hello world.",
+                "words": [
+                    {
+                        "word": " Hello",
+                        "tokens": [2425],
+                        "start": 1.0,
+                        "end": 1.4,
+                        "probability": 0.9,
+                    },
+                    {
+                        "word": " world.",
+                        "tokens": [1002, 13],
+                        "start": 1.4,
+                        "end": 2.4,
+                        "probability": 0.8,
+                    },
+                ],
+            }
+        ],
+    }
+
+    result = build_common_result(report)
+
+    assert result["language"] == "en"
+    assert result["segments"] == [
+        {
+            "start": 1.0,
+            "end": 2.4,
+            "text": "Hello world.",
+            "words": [
+                {"word": "Hello", "start": 1.0, "end": 1.4, "score": 0.9},
+                {"word": "world.", "start": 1.4, "end": 2.4, "score": 0.8},
+            ],
+        }
+    ]
+    assert result["word_segments"] == result["segments"][0]["words"]
+
+
+def test_build_common_result_drops_invalid_words_and_segments():
+    report = {
+        "language": "en",
+        "segments": [
+            {
+                "start": 0,
+                "end": 1,
+                "text": "valid",
+                "words": [
+                    {"word": "", "start": 0, "end": 0.2},
+                    {"word": "backward", "start": 0.8, "end": 0.4},
+                ],
+            },
+            {"start": 3, "end": 2, "text": "invalid", "words": []},
+        ],
+    }
+
+    result = build_common_result(report)
+
+    assert result["segments"] == []
+    assert result["word_segments"] == []
+
+
+def test_build_common_result_drops_padded_window_hallucinations():
+    report = {
+        "language": "en",
+        "timings": {"inputAudioSeconds": 18.0},
+        "segments": [
+            {
+                "start": 17.5,
+                "end": 41.2,
+                "text": " Last *music*",
+                "words": [
+                    {"word": " Last", "start": 17.5, "end": 18.1},
+                    {"word": " *music*", "start": 40.38, "end": 41.2},
+                ],
+            }
+        ],
+    }
+
+    result = build_common_result(report)
+
+    assert result["segments"] == [
+        {
+            "start": 17.5,
+            "end": 18.0,
+            "text": "Last",
+            "words": [{"word": "Last", "start": 17.5, "end": 18.0}],
+        }
+    ]
+    assert result["word_segments"] == [
+        {"word": "Last", "start": 17.5, "end": 18.0}
+    ]

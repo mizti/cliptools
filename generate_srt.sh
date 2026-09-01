@@ -319,6 +319,44 @@ PY
   python -m utils.whisperx_json_to_azure_json "$WHISPERX_JSON" "$TMP_JSON"
 }
 
+run_whisperkit_and_convert_to_tmp_json() {
+  step "WhisperKit STT (Core ML word timestamps)"
+  command -v "$WHISPERKIT_EXECUTABLE" >/dev/null 2>&1 || {
+    echo "WhisperKit CLI が必要です (brew install whisperkit-cli)" >&2
+    exit 1
+  }
+  WHISPERKIT_VERSION=$("$WHISPERKIT_EXECUTABLE" transcribe --version 2>/dev/null || true)
+  echo "  WhisperKit CLI version: ${WHISPERKIT_VERSION:-unknown}" >&2
+
+  WHISPER_LANG="en"
+  [[ "$LOCALE" == "ja-JP" ]] && WHISPER_LANG="ja"
+
+  LOG_DIR="${OUTDIR_ABS}/logs"
+  mkdir -p "$LOG_DIR"
+  WHISPERKIT_LOG="${LOG_DIR}/${BASE}_whisperkit.log"
+  WHISPERKIT_OUT_DIR="${OUTDIR_ABS}/whisperkit"
+  mkdir -p "$WHISPERKIT_OUT_DIR"
+  WHISPERKIT_JSON="${WHISPERKIT_OUT_DIR}/${BASE}_mono.json"
+
+  WHISPERKIT_ARGS=(
+    -m utils.whisperkit_cli "$MONO" "$WHISPERKIT_JSON"
+    --executable "$WHISPERKIT_EXECUTABLE"
+    --model "$WHISPERKIT_MODEL"
+    --language "$WHISPER_LANG"
+  )
+  [[ "$WHISPERKIT_INCREMENTAL_LOADING" == "0" ]] && WHISPERKIT_ARGS+=( --no-incremental-loading )
+  if [[ $DEBUG == true ]]; then
+    python "${WHISPERKIT_ARGS[@]}" 2>&1 | tee "$WHISPERKIT_LOG"
+  else
+    run_with_progress "$WHISPERKIT_LOG" python "${WHISPERKIT_ARGS[@]}"
+  fi
+
+  [[ -f "$WHISPERKIT_JSON" ]] || { echo "WhisperKit output JSON not found: $WHISPERKIT_JSON" >&2; exit 5; }
+
+  step "Convert WhisperKit JSON → Azure-like JSON ($TMP_JSON)"
+  python -m utils.whisperx_json_to_azure_json "$WHISPERKIT_JSON" "$TMP_JSON"
+}
+
 generate_srt_from_tmp_json() {
   # ---- 10 SRT ------------------------------------------------------------------
   step "Generate SRT (sentence-based via JSON parser)"
@@ -346,14 +384,23 @@ cleanup_and_report() {
 
 # ---- 引数処理 -----------------------------------------------------------------
 usage(){
-  echo "Usage: $0 [--engine azure|whisperx] [-o OUTDIR] [-n NUM] [-m MIN] [-M MAX] <audio.(wav|mp4|m4a|flac|aac)> [en-US|ja-JP]" >&2
+  echo "Usage: $0 [--engine azure|whisperx|whisperkit] [-o OUTDIR] [-n NUM] [-m MIN] [-M MAX] <audio.(wav|mp4|m4a|flac|aac)> [en-US|ja-JP]" >&2
   echo "       $0 --from-json <tmp_script.json> [-o OUTDIR] [en-US|ja-JP]" >&2
   exit 1
 }
 OUTDIR=""   # 明示指定がなければ音声ファイルと同じディレクトリに出力
 MIN_SPK=""; MAX_SPK=""; BOTH_SPK=""; FROM_JSON=""
 # デフォルトの STT エンジンは whisperx
-ENGINE="whisperx"   # azure | whisperx
+ENGINE="whisperx"   # azure | whisperx | whisperkit
+
+# WhisperKit defaults (native Apple Silicon/Core ML CLI installed by Homebrew)
+WHISPERKIT_EXECUTABLE="${WHISPERKIT_EXECUTABLE:-whisperkit-cli}"
+WHISPERKIT_MODEL="${WHISPERKIT_MODEL:-large-v3-v20240930_626MB}"
+WHISPERKIT_INCREMENTAL_LOADING="${WHISPERKIT_INCREMENTAL_LOADING:-1}"
+[[ "$WHISPERKIT_INCREMENTAL_LOADING" =~ ^[01]$ ]] || {
+  echo "WHISPERKIT_INCREMENTAL_LOADING は 0 または 1 で指定" >&2
+  exit 1
+}
 
 # whisperx defaults (CPU on macOS; MPS/Metal is not supported by faster-whisper/ctranslate2)
 WHISPERX_MIN_VERSION="3.8.6"
@@ -408,7 +455,7 @@ else
   AUDIO="$1"; LOCALE="${2:-en-US}"
 fi
 [[ "$LOCALE" =~ ^(en-US|ja-JP)$ ]] || { echo "locale は en-US/ja-JP で指定" >&2; exit 1; }
-[[ "$ENGINE" =~ ^(azure|whisperx)$ ]] || { echo "engine は azure|whisperx で指定" >&2; exit 1; }
+[[ "$ENGINE" =~ ^(azure|whisperx|whisperkit)$ ]] || { echo "engine は azure|whisperx|whisperkit で指定" >&2; exit 1; }
 if [[ -n $BOTH_SPK ]]; then MIN_SPK=$BOTH_SPK; MAX_SPK=$BOTH_SPK; fi
 : "${MIN_SPK:=1}"; : "${MAX_SPK:=1}"
 
@@ -443,6 +490,8 @@ if [[ -z $FROM_JSON ]]; then
   # ---- 分岐: TMP_JSON 生成 ------------------------------------------------------
   if [[ "$ENGINE" == "azure" ]]; then
     run_azure_stt_and_merge_to_tmp_json
+  elif [[ "$ENGINE" == "whisperkit" ]]; then
+    run_whisperkit_and_convert_to_tmp_json
   else
     run_whisperx_and_convert_to_tmp_json
   fi

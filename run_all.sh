@@ -14,7 +14,7 @@
 #   -u|--url       : ダウンロードしたい YouTube URL               (必須)
 #   -o|--outdir    : 出力ディレクトリ (既定: カレント)
 #   -l|--locale    : 字幕生成言語     (既定: en-US   → SpeakerX_en-US.srt)
-#   --engine       : STT エンジン (azure|whisperx) ※省略時は generate_srt.sh のデフォルト
+#   --engine       : STT エンジン (azure|whisperx|whisperkit) ※省略時は generate_srt.sh のデフォルト
 #   -W|--from-whisper-json : whisper-cli が出力した JSON から開始（内部フォーマットに変換して続行）
 #   --from-srt      : 既存の英語 SRT から開始（3.固有名詞補正 → 4.翻訳 のみ実行）
 #   -n <N>            : 話者数を N に固定               （-m/-N と排他）
@@ -48,7 +48,7 @@ FROM_JSON=""         # 既存の STT JSON（内部フォーマット: azure-stt.
 FROM_WHISPER_JSON="" # 既存の whisper-cli JSON から開始（内部フォーマットに変換して続行）
 FROM_SRT=""          # 既存の英語 SRT から開始（固有名詞補正→翻訳）
 LOCALE="en-US"
-ENGINE=""          # azure|whisperx. 空なら generate_srt.sh 側のデフォルトに任せる
+ENGINE=""          # azure|whisperx|whisperkit. 空なら generate_srt.sh 側のデフォルトに任せる
 CLIP_STARTS=()
 CLIP_ENDS=()
 AUDIO_ONLY=false
@@ -103,8 +103,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -n "$ENGINE" && ! "$ENGINE" =~ ^(azure|whisperx)$ ]]; then
-  echo "Error: --engine は azure|whisperx で指定してください" >&2
+if [[ -n "$ENGINE" && ! "$ENGINE" =~ ^(azure|whisperx|whisperkit)$ ]]; then
+  echo "Error: --engine は azure|whisperx|whisperkit で指定してください" >&2
   exit 1
 fi
 
