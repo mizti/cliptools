@@ -49,12 +49,15 @@ pip install -r requirements.txt
 字幕生成（`generate_srt.sh`）では音声抽出/変換に `ffmpeg` を使用します。macOS の場合は Homebrew で入れておくのが簡単です。
 
 ```bash
-brew install ffmpeg
+brew install ffmpeg xz
 ```
 yt-dlpを動作させるために必要なdenoをインストールしておきます。
 ```bash
 brew install pyenv deno
 ```
+
+`pyenv` の Python は `xz` のインストール後にビルドしてください。`import lzma` が
+失敗する既存環境では、`xz` を入れた状態で同じ Python バージョンを再インストールする必要があります。
 
 spaCy ベースの文分割を使うため、英語モデルも追加でインストールします。
 
@@ -316,8 +319,20 @@ WhisperX エンジン関連の環境変数（`--engine whisperx` のとき）:
 
 - `WHISPERX_MODEL` : モデル名（既定: `large-v3-turbo`）
 - `WHISPERX_VAD_METHOD` : VAD（既定: `silero`）
+- `WHISPERX_CHUNK_SIZE` : VAD 区間をまとめる最大秒数（既定: `30`）。短くすると区間が細かくなる一方、文脈不足で認識結果が悪化する場合があります
+- `WHISPERX_VAD_ONSET`, `WHISPERX_VAD_OFFSET` : VAD 閾値（省略時は WhisperX の既定値）。発話の取りこぼしや余分な無音がある場合の調整用です。WhisperX 3.8.6 の Silero 実装では `VAD_OFFSET` は使用されません
+- `WHISPERX_END_ANCHORED_ALIGNMENT` : forced alignment が merged VAD 区間の末尾を1秒超使わずに完了した場合、末尾を考慮する探索へフォールバック（既定: `1`）。後半の発話が区間前方の似た音へ割り当てられ、字幕が数秒早く出る事象を抑えます。WhisperX 3.8.6 本来の挙動との比較時だけ `0` にします
 - `WHISPERX_DEVICE` : 実行デバイス（既定: `cpu`）
 - `WHISPERX_COMPUTE_TYPE` : 計算精度（既定: **CPU の場合 `int8` / GPU の場合 `float16`**。環境変数で上書き可能）
+
+WhisperX `3.8.6` を使用し、実行時にも最低版を検査します。3.8.6 標準の forced alignment は
+典型的な開始誤差を改善する一方、長い merged VAD 区間ではアラインメントを音声より早く完了させる場合があります。
+既定の選択的な終端補正ラッパーは3.8.6のモデルとCLIを維持したまま、末尾を1秒超残す疑わしい探索だけを補正します。
+
+字幕の分割・表示時間関連の環境変数:
+
+- `CLIPTOOLS_MAX_SUBTITLE_CHARS` : 1字幕の目安文字数（既定: `60`）。必ず空白＝単語境界で分割し、単語途中では分割しません。`0` 以下で長さによる分割を無効化できます
+- `CLIPTOOLS_SUBTITLE_TAIL_SECONDS` : 最後の単語が終わった後も字幕を残す秒数（既定: `0.8`）。次の字幕が始まる場合はその開始時刻までに制限されます
 
 字幕用途向け（非セリフを落とす）:
 

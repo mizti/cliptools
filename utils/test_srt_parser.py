@@ -46,7 +46,7 @@ def test_sample_snippet() -> None:
         print(f"  ! {e}")
 
 
-def test_file(path: Path) -> None:
+def show_file(path: Path) -> None:
     """Parse an actual SRT file and show a short summary.
 
     Only the first few blocks are printed so this stays readable.
@@ -79,4 +79,4 @@ if __name__ == "__main__":
     for p in sample_paths:
         if p.exists():
             print("\n" + "=" * 40 + "\n")
-            test_file(p)
+            show_file(p)

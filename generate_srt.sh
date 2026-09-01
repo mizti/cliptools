@@ -44,34 +44,39 @@ run_with_progress() {
   "$@" >"$tmp_out" 2>&1 &
   local pid=$!
 
-  # If attached to a terminal, follow progress and paint a stable percent bar.
+  # If attached to a terminal, poll progress and paint a stable percent bar.
+  # A background `tail -f | while ...` pipeline is deliberately avoided here:
+  # killing only part of that pipeline leaves orphaned tail processes behind.
   # Depending on whisper.cpp version, progress output may look like:
   #   - "whisper_print_progress_callback: progress =  42%"
   #   - "Translating:  9%|..." (tqdm style)
-  local tail_pid=""
   if [[ -t 2 ]]; then
-    (
-      tail -n 0 -f "$tmp_out" 2>/dev/null | while IFS= read -r line; do
-        if [[ "$line" =~ whisper_print_progress_callback:.*progress[[:space:]]*=[[:space:]]*([0-9]{1,3})% ]]; then
-          _render_percent_bar "${BASH_REMATCH[1]}"
-        elif [[ "$line" =~ ([0-9]{1,3})%\| ]]; then
-          _render_percent_bar "${BASH_REMATCH[1]}"
-        fi
-      done
-    ) &
-    tail_pid=$!
+    local last_percent=""
+    while kill -0 "$pid" 2>/dev/null; do
+      local percent
+      percent=$(
+        tr '\r' '\n' <"$tmp_out" |
+          grep -Eo '(progress[[:space:]]*=[[:space:]]*|Progress:[[:space:]]*)[0-9]{1,3}(\.[0-9]+)?%|[0-9]{1,3}%\|' |
+          tail -n 1 |
+          grep -Eo '[0-9]{1,3}' |
+          head -n 1 || true
+      )
+      if [[ -n "$percent" && "$percent" != "$last_percent" ]]; then
+        _render_percent_bar "$percent"
+        last_percent="$percent"
+      fi
+      sleep 1
+    done
   fi
 
   local ec=0
-  if ! wait "$pid"; then
+  if wait "$pid"; then
+    ec=0
+  else
     ec=$?
   fi
 
-  if [[ -n "$tail_pid" ]]; then
-    # The tail pipeline may already have exited (e.g., SIGPIPE). Don't surface it.
-    kill "$tail_pid" 2>/dev/null || true
-    wait "$tail_pid" 2>/dev/null || true
-    # finish line
+  if [[ -t 2 ]]; then
     printf '\r' >&2
     printf '\n' >&2
   fi
@@ -236,7 +241,31 @@ JSON
 run_whisperx_and_convert_to_tmp_json() {
   # ---- whisperx STT --------------------------------------------------------
   step "WhisperX STT (word-level aligned)"
-  python -c "import whisperx" >/dev/null 2>&1 || { echo "Python package 'whisperx' が見つかりません (pip install -r requirements.txt)" >&2; exit 1; }
+  WHISPERX_VERSION=$(python - "$WHISPERX_MIN_VERSION" <<'PY' 2>/dev/null
+from importlib.metadata import PackageNotFoundError, version
+import sys
+
+from packaging.version import Version
+
+minimum = Version(sys.argv[1])
+try:
+    installed = version("whisperx")
+except PackageNotFoundError:
+    raise SystemExit(1)
+
+if Version(installed) < minimum:
+    raise SystemExit(2)
+
+import whisperx  # noqa: F401 - verify the package itself
+from whisperx import transcribe  # noqa: F401 - verify runtime dependencies
+from utils import whisperx_cli  # noqa: F401 - verify alignment wrapper
+print(installed)
+PY
+  ) || {
+    echo "Python package 'whisperx>=${WHISPERX_MIN_VERSION}' が必要です (pip install -r requirements.txt)" >&2
+    exit 1
+  }
+  echo "  WhisperX version: $WHISPERX_VERSION" >&2
 
   # locale -> whisper language
   WHISPER_LANG="auto"
@@ -257,17 +286,27 @@ run_whisperx_and_convert_to_tmp_json() {
 
   # Note: whisperx does NOT support MPS/Metal for faster-whisper backend on macOS.
   # Keep device/compute_type configurable via env vars.
+  WHISPERX_MODULE="whisperx"
+  if [[ "$WHISPERX_END_ANCHORED_ALIGNMENT" == "1" ]]; then
+    WHISPERX_MODULE="utils.whisperx_cli"
+    echo "  Conservative alignment fallback: enabled" >&2
+  else
+    echo "  Conservative alignment fallback: disabled" >&2
+  fi
   WHISPERX_ARGS=(
-    -m whisperx "$MONO"
+    -m "$WHISPERX_MODULE" "$MONO"
     --model "$WHISPERX_MODEL"
     --language "$WHISPER_LANG"
     --device "$WHISPERX_DEVICE"
     --compute_type "$WHISPERX_COMPUTE_TYPE"
     --vad_method "$WHISPERX_VAD_METHOD"
+    --chunk_size "$WHISPERX_CHUNK_SIZE"
     --output_dir "$WHISPERX_OUT_DIR"
     --output_format json
     --print_progress True
   )
+  [[ -n "$WHISPERX_VAD_ONSET" ]] && WHISPERX_ARGS+=( --vad_onset "$WHISPERX_VAD_ONSET" )
+  [[ -n "$WHISPERX_VAD_OFFSET" ]] && WHISPERX_ARGS+=( --vad_offset "$WHISPERX_VAD_OFFSET" )
   if [[ $DEBUG == true ]]; then
     python "${WHISPERX_ARGS[@]}" 2>&1 | tee "$WHISPERX_LOG"
   else
@@ -317,8 +356,21 @@ MIN_SPK=""; MAX_SPK=""; BOTH_SPK=""; FROM_JSON=""
 ENGINE="whisperx"   # azure | whisperx
 
 # whisperx defaults (CPU on macOS; MPS/Metal is not supported by faster-whisper/ctranslate2)
+WHISPERX_MIN_VERSION="3.8.6"
 WHISPERX_MODEL="${WHISPERX_MODEL:-large-v3-turbo}"
 WHISPERX_VAD_METHOD="${WHISPERX_VAD_METHOD:-silero}"
+WHISPERX_CHUNK_SIZE="${WHISPERX_CHUNK_SIZE:-30}"
+# Empty by default so WhisperX's version-appropriate VAD defaults are used.
+WHISPERX_VAD_ONSET="${WHISPERX_VAD_ONSET:-}"
+WHISPERX_VAD_OFFSET="${WHISPERX_VAD_OFFSET:-}"
+# WhisperX 3.8's unconstrained CTC endpoint can compress later text toward an
+# earlier similar sound within a merged VAD chunk. Use an end-anchored fallback
+# for suspicious paths by default; set to 0 only for upstream comparisons.
+WHISPERX_END_ANCHORED_ALIGNMENT="${WHISPERX_END_ANCHORED_ALIGNMENT:-1}"
+[[ "$WHISPERX_END_ANCHORED_ALIGNMENT" =~ ^[01]$ ]] || {
+  echo "WHISPERX_END_ANCHORED_ALIGNMENT は 0 または 1 で指定" >&2
+  exit 1
+}
 # CPU-friendly default; tweak if you have CUDA.
 WHISPERX_DEVICE="${WHISPERX_DEVICE:-cpu}"
 # Default compute type:

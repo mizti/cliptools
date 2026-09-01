@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from utils.srt_parser import (
     SRTBlock,
+    extend_subtitle_tails,
     merge_short_adjacent_blocks,
     normalize_english_pronoun_i,
     renumber_blocks,
@@ -52,3 +53,20 @@ def test_renumber_blocks_contiguous_and_serializable() -> None:
     text = blocks_to_text(out)
     ok, errors = validate_srt(text)
     assert ok, errors
+
+
+def test_extend_subtitle_tails_adds_reading_time_without_overlap() -> None:
+    blocks = [
+        _b(1, "00:00:01,000", "00:00:02,000", "First"),
+        _b(2, "00:00:02,500", "00:00:03,000", "Second"),
+        _b(3, "00:00:05,000", "00:00:06,000", "Last"),
+    ]
+
+    extended = extend_subtitle_tails(blocks, hold_seconds=0.8)
+
+    # The first cue is capped at the next cue instead of overlapping it.
+    assert extended[0].end == "00:00:02,500"
+    # A larger gap receives the full reading-time tail.
+    assert extended[1].end == "00:00:03,800"
+    # The final cue also remains visible after speech ends.
+    assert extended[2].end == "00:00:06,800"

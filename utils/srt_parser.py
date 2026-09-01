@@ -393,6 +393,41 @@ def fill_short_gaps(blocks: Iterable[SRTBlock], threshold: float = 0.8) -> List[
     return seq
 
 
+def extend_subtitle_tails(
+    blocks: Iterable[SRTBlock], hold_seconds: float = 0.8
+) -> List[SRTBlock]:
+    """Keep each subtitle visible briefly after its final spoken word.
+
+    The end time is extended by ``hold_seconds`` but is capped at the next
+    subtitle's start, so the extra reading time never overlaps new speech.
+    The last block is also extended; an SRT cue ending just past the media end
+    is harmless and preferable to disappearing immediately after the word.
+    """
+
+    seq: List[SRTBlock] = list(blocks)
+    if hold_seconds <= 0:
+        return seq
+
+    for i, cur in enumerate(seq):
+        try:
+            end_sec = _timestamp_to_seconds(cur.end)
+        except Exception:
+            continue
+
+        new_end_sec = end_sec + hold_seconds
+        if i < len(seq) - 1:
+            try:
+                next_start = _timestamp_to_seconds(seq[i + 1].start)
+            except Exception:
+                next_start = new_end_sec
+            new_end_sec = min(new_end_sec, next_start)
+
+        if new_end_sec > end_sec:
+            cur.end = _seconds_to_timestamp(new_end_sec)
+
+    return seq
+
+
 def _target_duration_for_text(text: str, base_min: float) -> float:
     """Compute a target display duration based on text length.
 

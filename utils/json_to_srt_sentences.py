@@ -19,7 +19,7 @@ from .srt_parser import (
     SRTBlock,
     blocks_to_text,
     enforce_min_duration,
-    fill_short_gaps,
+    extend_subtitle_tails,
     merge_short_adjacent_blocks,
     normalize_english_pronoun_i,
     renumber_blocks,
@@ -158,7 +158,12 @@ def generate_srt_for_speaker(json_path: Path, speaker: int) -> str:
     # 別のルールベース分割に切り替えたくなったら、この関数内でパラメータを変えるか、
     # 別実装を呼び出す形で拡張する。
     min_chars = PREFERRED_MIN_CHARS
-    preferred_max_chars = PREFERRED_MAX_CHARS
+    try:
+        preferred_max_chars = int(
+            os.getenv("CLIPTOOLS_MAX_SUBTITLE_CHARS", str(PREFERRED_MAX_CHARS))
+        )
+    except ValueError:
+        preferred_max_chars = PREFERRED_MAX_CHARS
 
     segments_data = align_segments_to_words(
         words,
@@ -198,8 +203,13 @@ def generate_srt_for_speaker(json_path: Path, speaker: int) -> str:
     # Ensure indices are always contiguous after any merges.
     blocks = renumber_blocks(blocks)
 
-    # Fill short gaps so subtitles do not disappear for <threshold gaps
-    blocks = fill_short_gaps(blocks, threshold=0.8)
+    # Keep a completed subtitle visible briefly for reading, but never overlap
+    # the next subtitle. Set the value to 0 to disable the extra tail.
+    try:
+        tail_seconds = float(os.getenv("CLIPTOOLS_SUBTITLE_TAIL_SECONDS", "0.8"))
+    except ValueError:
+        tail_seconds = 0.8
+    blocks = extend_subtitle_tails(blocks, hold_seconds=tail_seconds)
 
     # Ensure each block is visible for at least a minimum duration where possible.
     # We use 1.0s as a default, but never extend past the next block's start.
