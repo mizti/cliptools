@@ -8,7 +8,7 @@ def test_build_common_result_preserves_timing_and_scores():
             {
                 "start": 1.0,
                 "end": 2.4,
-                "text": " Hello world.",
+                "text": "stale display text",
                 "words": [
                     {
                         "word": " Hello",
@@ -50,6 +50,7 @@ def test_build_common_result_drops_invalid_words_and_segments():
     report = {
         "language": "en",
         "segments": [
+            {"start": float("nan"), "end": 1, "text": "nan", "words": []},
             {
                 "start": 0,
                 "end": 1,

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import subprocess
 import sys
@@ -17,9 +18,10 @@ def _as_float(value: Any) -> float | None:
     try:
         if value is None:
             return None
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return None
+    return number if math.isfinite(number) and number >= 0 else None
 
 
 def _join_words(words: list[dict[str, Any]], language: str) -> str:
@@ -41,7 +43,7 @@ def build_common_result(report: dict[str, Any]) -> dict[str, Any]:
             start = _as_float(source_word.get("start"))
             end = _as_float(source_word.get("end"))
             text = str(source_word.get("word") or "").strip()
-            if not text or start is None or end is None or end < start:
+            if not text or start is None or end is None or end <= start:
                 continue
             if duration is not None and start >= duration:
                 continue
@@ -65,12 +67,12 @@ def build_common_result(report: dict[str, Any]) -> dict[str, Any]:
             end = words[-1]["end"]
         if duration is not None and end is not None:
             end = min(end, duration)
-        if start is None or end is None or end < start:
+        if start is None or end is None or end <= start:
             continue
 
-        text = str(source_segment.get("text") or "").strip()
-        if len(words) != len(source_words):
-            text = _join_words(words, language)
+        text = _join_words(words, language)
+        if not text:
+            text = str(source_segment.get("text") or "").strip()
 
         segments.append(
             {
