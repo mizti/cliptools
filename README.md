@@ -10,14 +10,14 @@ YouTube 配信などの長尺動画やローカルの動画ファイルから日
 このリポジトリが提供するのは、次のような一連のパイプラインです。
 
 1. **YouTube から動画／音声をダウンロード**（`download.sh`）
-2. **Azure Speech (STT) / WhisperX / WhisperKit による自動文字起こし & 文単位 SRT 生成**（`generate_srt.sh`）
+2. **WhisperKit / Azure Speech (STT) による自動文字起こし & 文単位 SRT 生成**（`generate_srt.sh`）
 3. **英語 SRT の固有名詞補正**（`fix_unique_nouns.py`）
 4. **英語 SRT → 日本語 SRT 翻訳**（`translate_srt.sh` / `translate_srt_gpt.py`）
 5. **上記すべてをワンコマンドで実行**（`run_all.sh`）
 
 特徴:
 
-- WhisperX、WhisperKit、Azure Speech の **word-level timestamp** 相当を利用しつつ、SpaCy で自然な文単位に分割した SRT を生成
+- WhisperKit または Azure Speech の **word-level timestamp** 相当を利用しつつ、SpaCy で自然な文単位に分割した SRT を生成
 - 固有名詞用のカスタム辞書を使って、配信者名・作品名などの表記揺れを統一
 - Azure OpenAI (GPT) で SRT 構造を壊さずに日本語へ翻訳
 
@@ -65,21 +65,7 @@ spaCy ベースの文分割を使うため、英語モデルも追加でイン�
 python -m spacy download en_core_web_sm
 ```
 
-### 2-1-1. WhisperX（推奨: ローカルSTT）を使うためのセットアップ
-
-WhisperX は forced alignment によって word-level timestamp の精度が安定しやすいため、
-このリポジトリのローカル STT として推奨しています。
-
-インストール:
-
-```bash
-pip install -r requirements.txt
-```
-
-（重要）macOS の MPS/Metal GPU は WhisperX が内部で利用する faster-whisper/ctranslate2 の制約により
-現状サポートされません。macOS では基本的に CPU 実行になります。
-
-### 2-1-2. WhisperKit（Apple Silicon向けローカルSTT）を使うためのセットアップ
+### 2-1-1. WhisperKit（Apple Silicon向けローカルSTT）のセットアップ
 
 WhisperKit は Apple Silicon の Core ML / Neural Engine を利用します。CLI は Homebrew で導入します。
 
@@ -88,7 +74,7 @@ brew install whisperkit-cli
 ```
 
 初回実行時は指定モデルを Hugging Face からダウンロードします。WhisperKit と標準モデルは MIT
-ライセンスで、macOS 13 以降の Apple Silicon が必要です。
+ライセンスで、macOS 14 以降の Apple Silicon が必要です。
 
 ### 2-2. Azure リソースの準備（Speech + Storage）
 
@@ -177,7 +163,7 @@ source .env
 
 1. `run_all.sh`      – 一括処理用の統合スクリプト
 2. `download.sh`     – YouTube からのダウンロード＆クリップ
-3. `generate_srt.sh` – WhisperX / WhisperKit / Azure STT → 文単位 SRT 生成
+3. `generate_srt.sh` – WhisperKit / Azure STT → 文単位 SRT 生成
 4. `fix_unique_nouns.py` – 英語 SRT の固有名詞補正
 5. `translate_srt.sh` / `translate_srt_gpt.py` – 英語 → 日本語 SRT 翻訳
 
@@ -191,7 +177,7 @@ source .env
 主な処理:
 
 1. `download.sh` で YouTube から動画／音声を取得（または既存ファイルをそのまま利用）
-2. `generate_srt.sh` で STT → 文単位 SRT 生成（デフォルト: WhisperX / オプション: Azure Speech）
+2. `generate_srt.sh` で STT → 文単位 SRT 生成（デフォルト: WhisperKit / オプション: Azure Speech）
 3. `fix_unique_nouns.py` で英語 SRT の固有名詞を補正
 4. `translate_srt.sh` で日本語 SRT を生成
 
@@ -223,7 +209,7 @@ URL から取得した場合、ダウンロード完了後に出力ディレク�
 - `-f, --file`   : 既存のローカルメディアファイル（ダウンロードをスキップ）(-uか-fどちらか必須)
 - `-o, --outdir` : 出力ディレクトリ
 - `-l, --locale` : STT 言語（例: `en-US`）
-- `--engine`     : STT エンジン（`azure`、`whisperx`、`whisperkit`）。省略時は `generate_srt.sh` のデフォルト（whisperx）
+- `--engine`     : STT エンジン（`whisperkit`または`azure`）。省略時はWhisperKit
 - `--clip S E [...]` : `hh:mm:ss` 形式の開始／終了時刻ペアを指定して切り抜き。複数ペア指定可(Option)
 - `--audio`      : 音声のみをダウンロードして処理(Option)
 - `-n` / `-m` / `-N` : 話者数の固定／最小／最大 (Option / デフォルト1)
@@ -294,51 +280,37 @@ URL から取得した場合、ダウンロード完了後に出力ディレク�
 
 ---
 
-### 3-3. generate_srt.sh（WhisperX / WhisperKit / Azure STT → 文単位 SRT）
+### 3-3. generate_srt.sh（WhisperKit / Azure STT → 文単位 SRT）
 
 `generate_srt.sh` は、編集済み音声ファイル（または動画）から文字起こしを実行し、
 spaCy ベースの文分割で「読みやすい長さ」の SRT を生成します。
 
-デフォルトの STT エンジンは **WhisperX** です。
+デフォルトの STT エンジンは **WhisperKit** です。
 Azure Speech を使いたい場合は `--engine azure` を明示します。
 
 主な処理フロー:
 
 1. FFmpeg でモノラル WAV に変換
-2. STT 実行（デフォルト: WhisperX / オプション: Azure Speech）
+2. STT 実行（デフォルト: WhisperKit / オプション: Azure Speech）
 3. 出力ディレクトリに `azure-stt.json` を保存（内部フォーマット）
 4. `python -m utils.json_to_srt_sentences` で適度な長さの文単位の SRT を生成 (文を適切な長さで分割するためにSpaCyを利用)
 
 使い方:
 
 ```bash
-./generate_srt.sh [--engine azure|whisperx|whisperkit] [-o OUTDIR] [-n NUM] [-m MIN] [-M MAX] <audio.(wav|mp4|m4a|flac|aac)> [en-US|ja-JP]
+./generate_srt.sh [--engine whisperkit|azure] [-o OUTDIR] [-n NUM] [-m MIN] [-M MAX] <audio.(wav|mp4|m4a|flac|aac)> [en-US|ja-JP]
 ./generate_srt.sh --from-json <azure-stt.json> [-o OUTDIR] [en-US|ja-JP]
 ```
 
 主なオプション:
 
-- `--engine azure|whisperx|whisperkit` : 利用する STT エンジン（省略時: **whisperx**）
+- `--engine whisperkit|azure` : 利用する STT エンジン（省略時: **whisperkit**）
 - `-o OUTDIR`      : 出力先ディレクトリ（省略時は入力ファイル／JSON と同じディレクトリ）
 - `-n NUM`         : 話者数を固定（例: `-n 1` で 1 人）
 - `-m MIN`         : 話者数の最小値
 - `-M MAX`         : 話者数の最大値
 - `--from-json`    : 既に取得済みの STT JSON（内部フォーマット。通常は `azure-stt.json`）から SRT のみ再生成するモード
 - `LOCALE`         : `en-US` または `ja-JP`（省略時は `en-US`）
-
-WhisperX エンジン関連の環境変数（`--engine whisperx` のとき）:
-
-- `WHISPERX_MODEL` : モデル名（既定: `large-v3-turbo`）
-- `WHISPERX_VAD_METHOD` : VAD（既定: `silero`）
-- `WHISPERX_CHUNK_SIZE` : VAD 区間をまとめる最大秒数（既定: `30`）。短くすると区間が細かくなる一方、文脈不足で認識結果が悪化する場合があります
-- `WHISPERX_VAD_ONSET`, `WHISPERX_VAD_OFFSET` : VAD 閾値（省略時は WhisperX の既定値）。発話の取りこぼしや余分な無音がある場合の調整用です。WhisperX 3.8.6 の Silero 実装では `VAD_OFFSET` は使用されません
-- `WHISPERX_END_ANCHORED_ALIGNMENT` : forced alignment が merged VAD 区間の末尾を1秒超使わずに完了した場合、末尾を考慮する探索へフォールバック（既定: `1`）。後半の発話が区間前方の似た音へ割り当てられ、字幕が数秒早く出る事象を抑えます。WhisperX 3.8.6 本来の挙動との比較時だけ `0` にします
-- `WHISPERX_DEVICE` : 実行デバイス（既定: `cpu`）
-- `WHISPERX_COMPUTE_TYPE` : 計算精度（既定: **CPU の場合 `int8` / GPU の場合 `float16`**。環境変数で上書き可能）
-
-WhisperX `3.8.6` を使用し、実行時にも最低版を検査します。3.8.6 標準の forced alignment は
-典型的な開始誤差を改善する一方、長い merged VAD 区間ではアラインメントを音声より早く完了させる場合があります。
-既定の選択的な終端補正ラッパーは3.8.6のモデルとCLIを維持したまま、末尾を1秒超残す疑わしい探索だけを補正します。
 
 WhisperKit エンジン関連の環境変数（`--engine whisperkit` のとき）:
 
@@ -360,7 +332,7 @@ WhisperKit CLI `1.1.0` の `--word-timestamps` レポートを共通JSONへ変�
 - `CLIPTOOLS_DROP_NON_SPEECH=1` : `*music*` や `*laughs*` のような **`*...*` だけで構成されたブロック**を SRT から除去します（CC ではなく通常字幕向け）
 - `CLIPTOOLS_DROP_TEXTS` : 追加で落としたいテキストの正規表現をカンマ区切りで指定します（例: `^thank you\\.?$`）
 
-※このフィルタは、WhisperX / WhisperKit / Azure の全エンジンで共通の「内部 JSON → SRT」段階で適用されます。
+※このフィルタは、WhisperKit / Azure の両エンジンで共通の「内部 JSON → SRT」段階で適用されます。
 
 Azure エンジン使用時に必要な環境変数:
 
@@ -371,16 +343,13 @@ Azure エンジン使用時に必要な環境変数:
 例:
 
 ```bash
-# default (whisperx)
+# デフォルトのWhisperKitを使う
 ./generate_srt.sh input.mp4 en-US
 
 # Azure を使う
 ./generate_srt.sh --engine azure input.mp4 en-US
 
-# WhisperX を使う（デフォルト）
-./generate_srt.sh --engine whisperx input.mp4 en-US
-
-# WhisperKit を使う（Apple Silicon）
+# WhisperKitを明示する
 ./generate_srt.sh --engine whisperkit input.mp4 en-US
 ```
 
@@ -389,9 +358,7 @@ Azure エンジン使用時に必要な環境変数:
 - `OUTDIR` 配下に `Speaker1_en-US.srt` のような形で話者ごとの SRT が生成されます。
 - 通常モードでは、同じディレクトリに `azure-stt.json` も保存され、後から `--from-json` で再利用できます。
 
-（補足）WhisperX のログ:
-
-- WhisperX 実行ログは `OUTDIR/logs/` 配下に保存されます（端末には進捗だけ表示）。
+（補足）WhisperKitの実行ログは `OUTDIR/logs/` 配下に保存されます（端末には進捗だけ表示）。
 
 ---
 

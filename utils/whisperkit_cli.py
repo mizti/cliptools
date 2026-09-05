@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Run WhisperKit CLI and normalize its report to the shared WhisperX schema."""
+"""Run WhisperKit CLI and normalize its report to the shared ASR schema."""
 
 from __future__ import annotations
 
@@ -29,6 +29,40 @@ def _join_words(words: list[dict[str, Any]], language: str) -> str:
     return separator.join(word["word"] for word in words)
 
 
+def _word_bounds(segment: dict[str, Any]) -> tuple[float, float] | None:
+    words = segment["words"]
+    if not words:
+        return None
+    return words[0]["start"], words[-1]["end"]
+
+
+def _drop_contained_segments(
+    segments: list[dict[str, Any]], tolerance: float = 0.02
+) -> list[dict[str, Any]]:
+    """Drop shorter hypotheses wholly contained by another word-timed segment."""
+    ordered = sorted(
+        segments,
+        key=lambda segment: (
+            (_word_bounds(segment) or (segment["start"], segment["end"]))[0],
+            -(_word_bounds(segment) or (segment["start"], segment["end"]))[1],
+        ),
+    )
+    kept: list[dict[str, Any]] = []
+    kept_bounds: list[tuple[float, float] | None] = []
+    for segment in ordered:
+        bounds = _word_bounds(segment)
+        if bounds is not None and any(
+            existing is not None
+            and existing[0] <= bounds[0] + tolerance
+            and existing[1] >= bounds[1] - tolerance
+            for existing in kept_bounds
+        ):
+            continue
+        kept.append(segment)
+        kept_bounds.append(bounds)
+    return sorted(kept, key=lambda segment: (segment["start"], segment["end"]))
+
+
 def build_common_result(report: dict[str, Any]) -> dict[str, Any]:
     """Convert one WhisperKit ``TranscriptionResult`` report."""
     segments: list[dict[str, Any]] = []
@@ -54,6 +88,7 @@ def build_common_result(report: dict[str, Any]) -> dict[str, Any]:
             if score is not None:
                 word["score"] = score
             words.append(word)
+        words.sort(key=lambda word: (word["start"], word["end"]))
 
         start = _as_float(source_segment.get("start"))
         end = _as_float(source_segment.get("end"))
@@ -83,7 +118,10 @@ def build_common_result(report: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
-    segments.sort(key=lambda segment: (segment["start"], segment["end"]))
+    # Incremental VAD windows can occasionally emit a short competing
+    # hypothesis wholly inside a longer segment. Keeping both creates
+    # duplicate, out-of-order subtitles, so retain the complete hypothesis.
+    segments = _drop_contained_segments(segments)
     for segment in segments:
         word_segments.extend(dict(word) for word in segment["words"])
 

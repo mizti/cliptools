@@ -95,6 +95,47 @@ def test_build_common_result_sorts_incremental_segments_before_flattening():
     assert [word["word"] for word in result["word_segments"]] == ["earlier", "later"]
 
 
+def test_build_common_result_drops_fully_contained_competing_segment():
+    report = {
+        "language": "en",
+        "segments": [
+            {
+                "start": 1.5,
+                "end": 2.0,
+                "text": "competing",
+                "words": [{"word": "competing", "start": 1.5, "end": 2.0}],
+            },
+            {
+                "start": 1.0,
+                "end": 3.0,
+                "text": "complete hypothesis",
+                "words": [
+                    {"word": "complete", "start": 1.0, "end": 1.8},
+                    {"word": "hypothesis", "start": 1.8, "end": 3.0},
+                ],
+            },
+            {
+                "start": 4.0,
+                "end": 5.0,
+                "text": "later",
+                "words": [{"word": "later", "start": 4.0, "end": 5.0}],
+            },
+        ],
+    }
+
+    result = build_common_result(report)
+
+    assert [segment["text"] for segment in result["segments"]] == [
+        "complete hypothesis",
+        "later",
+    ]
+    assert [word["word"] for word in result["word_segments"]] == [
+        "complete",
+        "hypothesis",
+        "later",
+    ]
+
+
 def test_build_common_result_drops_padded_window_hallucinations():
     report = {
         "language": "en",

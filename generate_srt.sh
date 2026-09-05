@@ -238,87 +238,6 @@ JSON
   jq -s '[ .[] .recognizedPhrases[] ]' "$TMP_DIR"/seg_*.json > "$TMP_JSON"
 }
 
-run_whisperx_and_convert_to_tmp_json() {
-  # ---- whisperx STT --------------------------------------------------------
-  step "WhisperX STT (word-level aligned)"
-  WHISPERX_VERSION=$(python - "$WHISPERX_MIN_VERSION" <<'PY' 2>/dev/null
-from importlib.metadata import PackageNotFoundError, version
-import sys
-
-from packaging.version import Version
-
-minimum = Version(sys.argv[1])
-try:
-    installed = version("whisperx")
-except PackageNotFoundError:
-    raise SystemExit(1)
-
-if Version(installed) < minimum:
-    raise SystemExit(2)
-
-import whisperx  # noqa: F401 - verify the package itself
-from whisperx import transcribe  # noqa: F401 - verify runtime dependencies
-from utils import whisperx_cli  # noqa: F401 - verify alignment wrapper
-print(installed)
-PY
-  ) || {
-    echo "Python package 'whisperx>=${WHISPERX_MIN_VERSION}' が必要です (pip install -r requirements.txt)" >&2
-    exit 1
-  }
-  echo "  WhisperX version: $WHISPERX_VERSION" >&2
-
-  # locale -> whisper language
-  WHISPER_LANG="auto"
-  [[ "$LOCALE" == "en-US" ]] && WHISPER_LANG="en"
-  [[ "$LOCALE" == "ja-JP" ]] && WHISPER_LANG="ja"
-
-  LOG_DIR="${OUTDIR_ABS}/logs"
-  mkdir -p "$LOG_DIR"
-  WHISPERX_LOG="${LOG_DIR}/${BASE}_whisperx.log"
-  rm -f "$WHISPERX_LOG"
-
-  WHISPERX_OUT_DIR="${OUTDIR_ABS}/whisperx"
-  mkdir -p "$WHISPERX_OUT_DIR"
-
-  # whisperx writes <basename>.json into output_dir with --output_format json
-  WHISPERX_BASE="${BASE}_mono"
-  WHISPERX_JSON="${WHISPERX_OUT_DIR}/${WHISPERX_BASE}.json"
-
-  # Note: whisperx does NOT support MPS/Metal for faster-whisper backend on macOS.
-  # Keep device/compute_type configurable via env vars.
-  WHISPERX_MODULE="whisperx"
-  if [[ "$WHISPERX_END_ANCHORED_ALIGNMENT" == "1" ]]; then
-    WHISPERX_MODULE="utils.whisperx_cli"
-    echo "  Conservative alignment fallback: enabled" >&2
-  else
-    echo "  Conservative alignment fallback: disabled" >&2
-  fi
-  WHISPERX_ARGS=(
-    -m "$WHISPERX_MODULE" "$MONO"
-    --model "$WHISPERX_MODEL"
-    --language "$WHISPER_LANG"
-    --device "$WHISPERX_DEVICE"
-    --compute_type "$WHISPERX_COMPUTE_TYPE"
-    --vad_method "$WHISPERX_VAD_METHOD"
-    --chunk_size "$WHISPERX_CHUNK_SIZE"
-    --output_dir "$WHISPERX_OUT_DIR"
-    --output_format json
-    --print_progress True
-  )
-  [[ -n "$WHISPERX_VAD_ONSET" ]] && WHISPERX_ARGS+=( --vad_onset "$WHISPERX_VAD_ONSET" )
-  [[ -n "$WHISPERX_VAD_OFFSET" ]] && WHISPERX_ARGS+=( --vad_offset "$WHISPERX_VAD_OFFSET" )
-  if [[ $DEBUG == true ]]; then
-    python "${WHISPERX_ARGS[@]}" 2>&1 | tee "$WHISPERX_LOG"
-  else
-    run_with_progress "$WHISPERX_LOG" python "${WHISPERX_ARGS[@]}"
-  fi
-
-  [[ -f "$WHISPERX_JSON" ]] || { echo "whisperx output JSON not found: $WHISPERX_JSON" >&2; exit 5; }
-
-  step "Convert whisperx JSON → Azure-like JSON ($TMP_JSON)"
-  python -m utils.whisperx_json_to_azure_json "$WHISPERX_JSON" "$TMP_JSON"
-}
-
 run_whisperkit_and_convert_to_tmp_json() {
   step "WhisperKit STT (Core ML word timestamps)"
   command -v "$WHISPERKIT_EXECUTABLE" >/dev/null 2>&1 || {
@@ -354,7 +273,7 @@ run_whisperkit_and_convert_to_tmp_json() {
   [[ -f "$WHISPERKIT_JSON" ]] || { echo "WhisperKit output JSON not found: $WHISPERKIT_JSON" >&2; exit 5; }
 
   step "Convert WhisperKit JSON → Azure-like JSON ($TMP_JSON)"
-  python -m utils.whisperx_json_to_azure_json "$WHISPERKIT_JSON" "$TMP_JSON"
+  python -m utils.asr_json_to_azure_json "$WHISPERKIT_JSON" "$TMP_JSON"
 }
 
 generate_srt_from_tmp_json() {
@@ -384,14 +303,14 @@ cleanup_and_report() {
 
 # ---- 引数処理 -----------------------------------------------------------------
 usage(){
-  echo "Usage: $0 [--engine azure|whisperx|whisperkit] [-o OUTDIR] [-n NUM] [-m MIN] [-M MAX] <audio.(wav|mp4|m4a|flac|aac)> [en-US|ja-JP]" >&2
+  echo "Usage: $0 [--engine whisperkit|azure] [-o OUTDIR] [-n NUM] [-m MIN] [-M MAX] <audio.(wav|mp4|m4a|flac|aac)> [en-US|ja-JP]" >&2
   echo "       $0 --from-json <tmp_script.json> [-o OUTDIR] [en-US|ja-JP]" >&2
   exit 1
 }
 OUTDIR=""   # 明示指定がなければ音声ファイルと同じディレクトリに出力
 MIN_SPK=""; MAX_SPK=""; BOTH_SPK=""; FROM_JSON=""
-# デフォルトの STT エンジンは whisperx
-ENGINE="whisperx"   # azure | whisperx | whisperkit
+# デフォルトの STT エンジンは WhisperKit
+ENGINE="whisperkit"   # whisperkit | azure
 
 # WhisperKit defaults (native Apple Silicon/Core ML CLI installed by Homebrew)
 WHISPERKIT_EXECUTABLE="${WHISPERKIT_EXECUTABLE:-whisperkit-cli}"
@@ -402,36 +321,6 @@ WHISPERKIT_INCREMENTAL_LOADING="${WHISPERKIT_INCREMENTAL_LOADING:-1}"
   exit 1
 }
 
-# whisperx defaults (CPU on macOS; MPS/Metal is not supported by faster-whisper/ctranslate2)
-WHISPERX_MIN_VERSION="3.8.6"
-WHISPERX_MODEL="${WHISPERX_MODEL:-large-v3-turbo}"
-WHISPERX_VAD_METHOD="${WHISPERX_VAD_METHOD:-silero}"
-WHISPERX_CHUNK_SIZE="${WHISPERX_CHUNK_SIZE:-30}"
-# Empty by default so WhisperX's version-appropriate VAD defaults are used.
-WHISPERX_VAD_ONSET="${WHISPERX_VAD_ONSET:-}"
-WHISPERX_VAD_OFFSET="${WHISPERX_VAD_OFFSET:-}"
-# WhisperX 3.8's unconstrained CTC endpoint can compress later text toward an
-# earlier similar sound within a merged VAD chunk. Use an end-anchored fallback
-# for suspicious paths by default; set to 0 only for upstream comparisons.
-WHISPERX_END_ANCHORED_ALIGNMENT="${WHISPERX_END_ANCHORED_ALIGNMENT:-1}"
-[[ "$WHISPERX_END_ANCHORED_ALIGNMENT" =~ ^[01]$ ]] || {
-  echo "WHISPERX_END_ANCHORED_ALIGNMENT は 0 または 1 で指定" >&2
-  exit 1
-}
-# CPU-friendly default; tweak if you have CUDA.
-WHISPERX_DEVICE="${WHISPERX_DEVICE:-cpu}"
-# Default compute type:
-# - Prefer float16 when possible (e.g. CUDA)
-# - But on CPU (macOS default), float16 is often unsupported/inefficient in ctranslate2.
-if [[ -n ${WHISPERX_COMPUTE_TYPE:-} ]]; then
-  WHISPERX_COMPUTE_TYPE="$WHISPERX_COMPUTE_TYPE"
-else
-  if [[ "$WHISPERX_DEVICE" == "cpu" ]]; then
-    WHISPERX_COMPUTE_TYPE="int8"
-  else
-    WHISPERX_COMPUTE_TYPE="float16"
-  fi
-fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --engine) ENGINE="$2"; shift 2 ;;
@@ -455,7 +344,7 @@ else
   AUDIO="$1"; LOCALE="${2:-en-US}"
 fi
 [[ "$LOCALE" =~ ^(en-US|ja-JP)$ ]] || { echo "locale は en-US/ja-JP で指定" >&2; exit 1; }
-[[ "$ENGINE" =~ ^(azure|whisperx|whisperkit)$ ]] || { echo "engine は azure|whisperx|whisperkit で指定" >&2; exit 1; }
+[[ "$ENGINE" =~ ^(whisperkit|azure)$ ]] || { echo "engine は whisperkit|azure で指定" >&2; exit 1; }
 if [[ -n $BOTH_SPK ]]; then MIN_SPK=$BOTH_SPK; MAX_SPK=$BOTH_SPK; fi
 : "${MIN_SPK:=1}"; : "${MAX_SPK:=1}"
 
@@ -488,12 +377,10 @@ if [[ -z $FROM_JSON ]]; then
   ffmpeg_mono_convert
 
   # ---- 分岐: TMP_JSON 生成 ------------------------------------------------------
-  if [[ "$ENGINE" == "azure" ]]; then
-    run_azure_stt_and_merge_to_tmp_json
-  elif [[ "$ENGINE" == "whisperkit" ]]; then
+  if [[ "$ENGINE" == "whisperkit" ]]; then
     run_whisperkit_and_convert_to_tmp_json
   else
-    run_whisperx_and_convert_to_tmp_json
+    run_azure_stt_and_merge_to_tmp_json
   fi
 fi
 
